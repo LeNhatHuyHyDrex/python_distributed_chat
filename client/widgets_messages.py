@@ -303,6 +303,7 @@ class MessageList(QListWidget):
             "is_me": is_me,
             "kind": "text",
             "path": None,
+            "content": content,
         })
         self.addItem(item)
         self.setItemWidget(item, widget)
@@ -335,6 +336,7 @@ class MessageList(QListWidget):
             "is_me": is_me,
             "kind": "image",
             "path": image_path,
+            "content": image_path,
         })
         self.addItem(item)
         self.setItemWidget(item, widget)
@@ -366,6 +368,7 @@ class MessageList(QListWidget):
             "is_me": is_me,
             "kind": "file",
             "path": file_path,
+            "content": file_path,
         })
         self.addItem(item)
         self.setItemWidget(item, widget)
@@ -397,6 +400,7 @@ class MessageList(QListWidget):
             "is_me": is_me,
             "kind": "video",
             "path": file_path,
+            "content": file_path,
         })
         self.addItem(item)
         self.setItemWidget(item, widget)

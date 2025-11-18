@@ -2,6 +2,7 @@ import socket
 import base64
 import os
 import shutil
+import re
 from pathlib import Path
 from typing import Any
 
@@ -910,6 +911,60 @@ class ChatWindow(QMainWindow):
                 self.lbl_chat_status.setText(
                     "❌ Gửi tin nhắn nhóm thất bại: " + str(data.get("error"))
                 )
+
+        elif action == "send_group_image_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                filename = data.get("filename") or ""
+                mid = data.get("message_id")
+                if self.current_group_id == conv_id and filename:
+                    base_dir = Path(__file__).resolve().parents[1]
+                    img_path = base_dir / "server" / "storage" / "images" / filename
+                    self.chat_list.add_image_bubble(
+                        mid,
+                        self.current_username,
+                        self.current_username,
+                        str(img_path),
+                        True,
+                        None,
+                    )
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Gửi ảnh nhóm thất bại: " + str(data.get("error"))
+                )
+
+        elif action == "send_group_file_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                filename = data.get("filename") or ""
+                file_type = (data.get("file_type") or "file").lower()
+                mid = data.get("message_id")
+                if self.current_group_id == conv_id and filename:
+                    base_dir = Path(__file__).resolve().parents[1]
+                    storage = Path("files")
+                    add_fn = self.chat_list.add_file_bubble
+                    if file_type == "video":
+                        storage = Path("videos")
+                        add_fn = self.chat_list.add_video_bubble
+                    elif file_type == "image":
+                        storage = Path("images")
+                        add_fn = self.chat_list.add_image_bubble
+                    full_path = base_dir / "server" / "storage" / storage / filename
+                    add_fn(
+                        mid,
+                        self.current_username,
+                        self.current_username,
+                        str(full_path),
+                        True,
+                        None,
+                    )
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Gửi file nhóm thất bại: " + str(data.get("error"))
+                )
+
         elif action == "group_history_result":
             if not data.get("ok"):
                 self.lbl_chat_status.setText(
@@ -964,179 +1019,9 @@ class ChatWindow(QMainWindow):
                         True, avatar_pix,
                     )
 
-            # cập nhật info panel + nút
             self._update_group_info_panel(conv_id)
             self._update_group_buttons_state()
             self.lbl_chat_status.setText(f"✅ Đã tải {len(msgs)} tin nhắn trong nhóm #{conv_id}")
-
-
-
-        elif action == "incoming_file":
-            sender = data.get("from")
-            filename = data.get("filename")
-            file_type = data.get("file_type")
-            msg_id = data.get("message_id")
-
-            base = Path(__file__).resolve().parents[1] / "server" / "storage"
-
-            if file_type == "image":
-                fpath = base / "images" / filename
-                self.chat_list.add_image_bubble(
-                    msg_id, sender, self.current_username, str(fpath)
-                )
-
-            elif file_type == "video":
-                fpath = base / "videos" / filename
-                self.chat_list.add_video_bubble(
-                    msg_id, sender, self.current_username, str(fpath)
-                )
-
-            else:
-                fpath = base / "files" / filename
-                self.chat_list.add_file_bubble(
-                    msg_id, sender, self.current_username, str(fpath)
-                )
-
-        elif action == "attachments_result":
-            if not data.get("ok"):
-                self.lbl_chat_status.setText(
-                    "❌ Không lấy được danh sách: " + str(data.get("error"))
-                )
-                return
-
-            filter_kind = data.get("filter")
-            partner = data.get("partner")
-            items = data.get("items", [])
-
-            if not hasattr(self, "list_attachments"):
-                return
-
-            self.list_attachments.clear()
-
-            if not items:
-                empty_text = "Không có dữ liệu."
-                if filter_kind == "media":
-                    empty_text = "Chưa có ảnh / video nào."
-                elif filter_kind == "files":
-                    empty_text = "Chưa có file nào."
-                elif filter_kind == "links":
-                    empty_text = "Chưa có link nào."
-                self.list_attachments.addItem(empty_text)
-            else:
-                base_dir = Path(__file__).resolve().parents[1]
-                images_dir = base_dir / "server" / "storage" / "images"
-                videos_dir = base_dir / "server" / "storage" / "videos"
-                files_dir  = base_dir / "server" / "storage" / "files"
-
-                for m in items:
-                    msg_id = m.get("id")
-                    created_at = m.get("created_at") or ""
-                    msg_type = (m.get("msg_type") or "").lower()
-                    content = m.get("content") or ""   # tên file hoặc link
-                    short = content if len(content) <= 60 else content[:57] + "..."
-
-                    prefix = "•"
-                    if filter_kind == "media":
-                        prefix = "🖼"
-                    elif filter_kind == "files":
-                        prefix = "📎"
-                    elif filter_kind == "links":
-                        prefix = "🔗"
-
-                    line = f"{prefix} [{created_at}] #{msg_id}: {short}"
-                    item = QListWidgetItem(line)
-
-                    path = None
-                    if msg_type == "image":
-                        path = str(images_dir / content)
-                    elif msg_type == "video":
-                        path = str(videos_dir / content)
-                    elif msg_type == "file":
-                        path = str(files_dir / content)
-
-                    item.setData(Qt.ItemDataRole.UserRole, {
-                        "id": msg_id,
-                        "msg_type": msg_type,
-                        "content": content,
-                        "path": path,
-                    })
-                    self.list_attachments.addItem(item)
-
-
-            self.list_attachments.setVisible(True)
-            self.list_attachments.scrollToTop()
-
-            self.lbl_chat_status.setText(
-                f"✅ Có {len(items)} mục trong '{filter_kind}' với {partner or ''}"
-            )
-
-        elif action == "send_file_result":
-            if data.get("ok"):
-                to_user = data.get("to")
-                filename = data.get("filename")
-                file_type = (data.get("file_type") or "file").lower()
-                msg_id = data.get("message_id")
-
-                base = Path(__file__).resolve().parents[1] / "server" / "storage"
-
-                # Chỉ add bubble nếu hiện đang mở đúng đoạn chat
-                if self.current_partner_username == to_user:
-                    if file_type == "image":
-                        fpath = base / "images" / filename
-                        self.chat_list.add_image_bubble(
-                            msg_id,
-                            self.current_username,
-                            self.current_username,
-                            str(fpath),
-                        )
-                    elif file_type == "video":
-                        fpath = base / "videos" / filename
-                        self.chat_list.add_video_bubble(
-                            msg_id,
-                            self.current_username,
-                            self.current_username,
-                            str(fpath),
-                        )
-                    else:
-                        fpath = base / "files" / filename
-                        self.chat_list.add_file_bubble(
-                            msg_id,
-                            self.current_username,
-                            self.current_username,
-                            str(fpath),
-                        )
-
-                # Dù có đang mở hay không vẫn cập nhật sidebar
-                self.request_conversations()
-            else:
-                self.lbl_chat_status.setText(
-                    "❌ Gửi file thất bại: " + str(data.get("error"))
-                )
-
-
-        elif action == "send_image_result":
-                    if data.get("ok"):
-                        msg_id = data.get("message_id")
-                        to_user = data.get("to")
-                        filename = data.get("filename")
-
-                        # đường dẫn ảnh nằm trong server/uploads
-                        base_dir = Path(__file__).resolve().parents[1]
-                        img_path = base_dir / "server" / "storage" / "images" / filename
-
-
-                        if self.le_to_user.text().strip() == to_user:
-                            self.chat_list.add_image_bubble(
-                                msg_id,
-                                self.current_username,
-                                self.current_username,
-                                str(img_path),
-                            )
-                        self.request_conversations()
-                    else:
-                        self.lbl_chat_status.setText(
-                            "❌ Gửi ảnh thất bại: " + str(data.get("error"))
-                        )
 
         elif action == "login_result":
             if data.get("ok"):
@@ -1300,7 +1185,23 @@ class ChatWindow(QMainWindow):
                     self.sidebar.set_search_results(items)
             # nếu fail thì bỏ qua, không cần báo lỗi
 
-
+        elif action == "attachments_result":
+            self._handle_attachments_result(data)
+            if data.get("ok"):
+                kind = (data.get("filter") or "").lower()
+                kind_label = {
+                    "media": "ảnh / video",
+                    "files": "file",
+                    "links": "link",
+                }.get(kind, "dữ liệu")
+                if data.get("items"):
+                    self.lbl_chat_status.setText(f"✅ Đã tải danh sách {kind_label}.")
+                else:
+                    self.lbl_chat_status.setText(f"ℹ️ Chưa có {kind_label} nào được gửi.")
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Lỗi tải danh sách tệp tin: " + str(data.get("error"))
+                )
 
         elif action == "delete_conversation_result":
             if data.get("ok"):
@@ -1508,6 +1409,89 @@ class ChatWindow(QMainWindow):
                 self.btn_delete_conversation.setVisible(True)
                 self.btn_delete_conversation.setText("Xóa đoạn chat")
 
+    def _prefill_attachments_from_chat(self, kind: str) -> int:
+        if not hasattr(self, "chat_list") or not hasattr(self, "list_attachments"):
+            return 0
+        kind = (kind or "").lower()
+        entries = []
+        if kind == "links":
+            for idx in range(self.chat_list.count() - 1, -1, -1):
+                item = self.chat_list.item(idx)
+                if not item:
+                    continue
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                text = data.get("content") or ""
+                url = self._extract_first_url(text)
+                if not url:
+                    continue
+                entries.append({
+                    "id": data.get("id"),
+                    "msg_type": "link",
+                    "content": url,
+                    "path": None,
+                })
+                if len(entries) >= 20:
+                    break
+        else:
+            allowed_map = {"media": {"image", "video"}, "files": {"file"}}
+            allowed = allowed_map.get(kind)
+            if not allowed:
+                return 0
+            for idx in range(self.chat_list.count() - 1, -1, -1):
+                item = self.chat_list.item(idx)
+                if not item:
+                    continue
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                msg_kind = (data.get("kind") or "").lower()
+                if msg_kind not in allowed:
+                    continue
+                path = data.get("path") or ""
+                entries.append({
+                    "id": data.get("id"),
+                    "msg_type": msg_kind,
+                    "content": os.path.basename(path) or msg_kind.upper(),
+                    "path": path,
+                })
+                if len(entries) >= 20:
+                    break
+
+        if not entries:
+            return 0
+
+        self.list_attachments.clear()
+        for entry in reversed(entries):
+            prefix = "🔗"
+            if entry["msg_type"] == "image":
+                prefix = "🖼"
+            elif entry["msg_type"] == "video":
+                prefix = "🎬"
+            elif entry["msg_type"] == "file":
+                prefix = "📎"
+            line = f"{prefix} [Hiện tại] #{entry['id'] or '?'}: {entry['content']}"
+            item = QListWidgetItem(line)
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.list_attachments.addItem(item)
+        self.list_attachments.setVisible(True)
+        self.list_attachments.scrollToTop()
+        return len(entries)
+
+    def _extract_first_url(self, text: str) -> str | None:
+        if not text:
+            return None
+        match = re.search(r"(https?://\S+)", text)
+        return match.group(1).rstrip(").,") if match else None
+
+    def _open_link(self, url: str):
+        if not url:
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("⚠️ Link không hợp lệ")
+            return
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
+        if not QDesktopServices.openUrl(QUrl(url)):
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("❌ Không mở được liên kết")
+
     def _get_user_avatar_pixmap(self, username: str, size: int) -> QPixmap | None:
         """
         Lấy QPixmap avatar tròn cho username với kích thước size.
@@ -1555,7 +1539,6 @@ class ChatWindow(QMainWindow):
             # im lặng nếu lỗi
             pass
 
-# ...existing code...
     def on_show_attachments(self, kind: str):
         """
         kind: 'media' | 'files' | 'links'
@@ -1567,13 +1550,37 @@ class ChatWindow(QMainWindow):
             return
 
         partner = self.current_partner_username or self.le_to_user.text().strip()
-        if not partner:
+        if not self.current_group_id and not partner:
             self.lbl_chat_status.setText("⚠️ Chưa chọn đoạn chat")
             return
 
+        prefilled = self._prefill_attachments_from_chat(kind)
+        if not prefilled and hasattr(self, "list_attachments"):
+            self.list_attachments.clear()
+            self.list_attachments.addItem("⏳ Đang lấy dữ liệu từ server...")
+            self.list_attachments.setVisible(True)
+            self.list_attachments.scrollToTop()
+
+        target_label = f"nhóm #{self.current_group_id}" if self.current_group_id else partner
+        kind_label = {
+            "media": "ảnh / video",
+            "files": "tệp",
+            "links": "liên kết",
+        }.get(kind, "dữ liệu")
+
         if not self.sock:
-            self.lbl_chat_status.setText("⚠️ Mất kết nối server")
+            if prefilled:
+                self.lbl_chat_status.setText("⚠️ Mất kết nối server – đang hiển thị dữ liệu hiện có.")
+            else:
+                self.lbl_chat_status.setText("⚠️ Mất kết nối server")
             return
+
+        if prefilled:
+            self.lbl_chat_status.setText(
+                f"🔎 Đã hiển thị tạm {prefilled} mục, tiếp tục đồng bộ {kind_label} từ {target_label}..."
+            )
+        else:
+            self.lbl_chat_status.setText(f"⏳ Đang lấy {kind_label} từ {target_label}...")
 
         if self.current_group_id:
             pkt = make_packet("list_attachments", {
@@ -1933,3 +1940,74 @@ class ChatWindow(QMainWindow):
 
         # fallback
         QMessageBox.information(self, "Thông báo", "Loại file không được hỗ trợ.")
+
+    def _handle_attachments_result(self, data: dict):
+        """
+        Xử lý kết quả từ server khi yêu cầu danh sách attachments (media/files/links).
+        Hiển thị danh sách vào list_attachments hoặc thông báo lỗi/trạng thái.
+        """
+        if not data.get("ok"):
+            self.lbl_chat_status.setText("❌ Lỗi tải danh sách tệp tin: " + str(data.get("error")))
+            return
+
+        items = data.get("items") or []
+        filter_kind = data.get("filter") or ""
+
+        # clear current list
+        self.list_attachments.clear()
+
+        if not items:
+            empty_text = "Không có dữ liệu."
+            if filter_kind == "media":
+                empty_text = "Chưa có ảnh / video nào được gửi."
+            elif filter_kind == "files":
+                empty_text = "Chưa có file nào được gửi."
+            elif filter_kind == "links":
+                empty_text = "Chưa có link nào được gửi."
+            self.list_attachments.addItem(empty_text)
+        else:
+            for it in items:
+                msg_id = it.get("id")
+                content = it.get("content") or ""
+                path = it.get("path") or ""
+                msg_type = (it.get("msg_type") or "").lower()
+
+                # xử lý riêng cho links: hiển thị URL thực sự
+                if filter_kind == "links":
+                    link_url = self._extract_first_url(content) or content
+                    msg_type = "link"
+                    content = link_url
+
+                short = content if len(content) <= 60 else content[:57] + "..."
+                prefix = "•"
+                if filter_kind == "media":
+                    prefix = "🖼"
+                elif filter_kind == "files":
+                    prefix = "📎"
+                elif filter_kind == "links":
+                    prefix = "🔗"
+                line = f"{prefix} #{msg_id}: {short}"
+
+                item = QListWidgetItem(line)
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    "id": msg_id,
+                    "msg_type": msg_type,
+                    "content": content,
+                    "path": path,
+                })
+                self.list_attachments.addItem(item)
+
+        self.list_attachments.setVisible(True)
+        self.list_attachments.scrollToTop()
+
+    def on_attachments_result(self, data: dict):
+        """
+        Khi nhận được kết quả danh sách tệp tin từ server:
+        - Nếu có lỗi, hiển thị thông báo lỗi.
+        - Nếu không có dữ liệu, hiển thị thông báo tương ứng.
+        - Nếu có dữ liệu, hiển thị vào list_attachments.
+        """
+        action = data.get("action")
+        if action == "list_attachments":
+            self._handle_attachments_result(data)
+        # có thể thêm xử lý cho các action khác nếu cần thiết

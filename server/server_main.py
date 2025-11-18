@@ -751,6 +751,18 @@ def handle_client(conn: socket.socket, addr):
                         return "http://" in cl or "https://" in cl
                     return False
 
+                def resolve_path(msg_type: str, filename: str) -> str:
+                    if not filename:
+                        return ""
+                    t = msg_type.lower()
+                    if t in ("image", "photo"):
+                        return str((IMAGES_DIR / filename).resolve())
+                    if t in ("video", "audio"):
+                        return str((VIDEOS_DIR / filename).resolve())
+                    if t in ("file", "document"):
+                        return str((FILES_DIR / filename).resolve())
+                    return ""
+
                 items = []
                 for m in msgs:
                     if not is_match(m):
@@ -762,17 +774,19 @@ def handle_client(conn: socket.socket, addr):
                         )
                     else:
                         created_str = str(created_at) if created_at is not None else ""
+                    msg_type = (m.get("msg_type") or "text")
+                    filename = m.get("content") or ""
                     items.append({
                         "id": m.get("id"),
-                        "msg_type": m.get("msg_type"),
-                        "content": m.get("content"),
+                        "msg_type": msg_type,
+                        "content": filename,
                         "created_at": created_str,
+                        "path": resolve_path(msg_type, filename),
                     })
 
                 send_to_conn(conn, "attachments_result", {
                     "ok": True,
                     "filter": filter_kind,
-                    # partner may be None for group
                     "partner": partner_username if not conv_id_raw else None,
                     "items": items,
                 })

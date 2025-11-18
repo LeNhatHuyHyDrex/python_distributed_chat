@@ -375,27 +375,14 @@ def _build_chat_page(win: QWidget):
     info_layout.addWidget(win.btn_files)
     info_layout.addWidget(win.btn_links)
 
-    # List hiển thị Ảnh/Video/File/Link
     win.list_attachments = QListWidget()
     win.list_attachments.setObjectName("info_list")
-    win.list_attachments.setVisible(False)      # mặc định ẩn
-    win.list_attachments.setMinimumHeight(120)  # cho nó có chiều cao chút
-
+    win.list_attachments.setVisible(False)
+    win.list_attachments.setMinimumHeight(120)
     info_layout.addWidget(win.list_attachments)
 
     info_layout.addStretch()
-    info_layout.addWidget(win.btn_delete_conversation)
-    info_layout.addWidget(win.btn_media)
-    info_layout.addWidget(win.btn_files)
-    info_layout.addWidget(win.btn_links)
-
-    win.list_attachments = QListWidget()
-    ...
-
-    info_layout.addWidget(win.list_attachments)
-
-    info_layout.addStretch()
-    info_layout.addWidget(win.btn_leave_group)       # 👈 thêm dòng này
+    info_layout.addWidget(win.btn_leave_group)
     info_layout.addWidget(win.btn_delete_conversation)
 
     chat_outer.addWidget(win.info_panel, 1)
