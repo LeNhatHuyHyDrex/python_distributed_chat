@@ -969,6 +969,7 @@ def handle_client(conn: socket.socket, addr):
                                 })
                         except Exception:
                             pass
+                        
     # end of big while/try handling client: add missing except/finally and main()
     except Exception as e:
         print("Error while handling client:", e)

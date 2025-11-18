@@ -366,6 +366,7 @@ def _build_chat_page(win: QWidget):
     win.btn_media = QPushButton("Ảnh & Video")
     win.btn_files = QPushButton("File")
     win.btn_links = QPushButton("Link")
+    
     win.btn_delete_conversation = QPushButton("Xóa đoạn chat")
     win.btn_delete_conversation.setObjectName("danger_button")
     win.btn_leave_group = QPushButton("Rời nhóm")

@@ -346,6 +346,9 @@ class ChatWindow(QMainWindow):
             self.btn_files.clicked.connect(lambda: self.on_show_attachments("files"))
         if hasattr(self, "btn_links"):
             self.btn_links.clicked.connect(lambda: self.on_show_attachments("links"))
+        if hasattr(self, "btn_members"):
+            self.btn_members.clicked.connect(self.on_show_members)
+
 
         # Chat list interactions
         self.chat_list.delete_requested.connect(self.on_delete_from_context)
@@ -740,6 +743,8 @@ class ChatWindow(QMainWindow):
             self._update_group_info_panel(conv_id)
             # request group history
             self.request_group_history(conv_id)
+            
+            
 
         # >>> auto reload tab info nếu đang mở <<<
         if hasattr(self, "list_attachments") and self.list_attachments.isVisible():
@@ -827,6 +832,7 @@ class ChatWindow(QMainWindow):
             )
 
             self.request_conversations()
+            self.reload_info_panel()
         elif action == "send_image_result":
             # phản hồi cho người GỬI ảnh trong chat 1-1
             if data.get("ok"):
@@ -850,6 +856,8 @@ class ChatWindow(QMainWindow):
                     str(img_path),
                 )
                 self.request_conversations()
+                self.reload_info_panel()
+
             else:
                 self.lbl_chat_status.setText("❌ Gửi ảnh thất bại: " + str(data.get("error")))
 
@@ -889,6 +897,7 @@ class ChatWindow(QMainWindow):
                 str(full_path),
             )
             self.request_conversations()
+            self.reload_info_panel()
 
         elif action == "send_file_result":
             # phản hồi cho người GỬI file / video trong chat 1-1
@@ -924,6 +933,8 @@ class ChatWindow(QMainWindow):
                     str(full_path),
                 )
                 self.request_conversations()
+                self.reload_info_panel()
+
             else:
                 self.lbl_chat_status.setText("❌ Gửi file thất bại: " + str(data.get("error")))
 
@@ -1315,6 +1326,8 @@ class ChatWindow(QMainWindow):
 
                 # Dù group hay 1-1 vẫn cập nhật list cuộc trò chuyện
                 self.request_conversations()
+                self.reload_info_panel()
+
             else:
                 self.lbl_chat_status.setText("❌ Gỡ thất bại: " + str(data.get("error")))
 
@@ -1509,7 +1522,8 @@ class ChatWindow(QMainWindow):
         if hasattr(self, "btn_delete_conversation"):
             self.btn_delete_conversation.setVisible(True)
             self.btn_delete_conversation.setText("Xóa đoạn chat")
-
+        if hasattr(self, "btn_members"):
+            self.btn_members.setVisible(False)
         if not partner_username:
             self.lbl_partner_name.setText("Chưa chọn đoạn chat")
             self.lbl_partner_username.setText("")
@@ -1600,7 +1614,7 @@ class ChatWindow(QMainWindow):
         if hasattr(self, "btn_delete_conversation"):
             self.btn_delete_conversation.setVisible(True)
             self.btn_delete_conversation.setText("Xóa nhóm")
-
+        
         # cập nhật trạng thái nút theo cờ current_group_is_owner
         self._update_group_buttons_state()
 
@@ -1848,6 +1862,8 @@ class ChatWindow(QMainWindow):
 
         try:
             self.sock.sendall(pkt)
+            self.reload_info_panel()
+
         except Exception as e:
             self.lbl_chat_status.setText(f"❌ Lỗi gửi ảnh: {e}")
 
@@ -1879,6 +1895,8 @@ class ChatWindow(QMainWindow):
         # Gửi kiểu 'file' (send_file wrapper xử lý gửi group/private)
         try:
             self.send_file(path, "file")
+            self.reload_info_panel()
+
         except Exception as e:
             if getattr(self, "lbl_chat_status", None):
                 self.lbl_chat_status.setText(f"❌ Lỗi gửi file: {e}")
@@ -1909,6 +1927,8 @@ class ChatWindow(QMainWindow):
 
         try:
             self.send_file(path, "video")
+            self.reload_info_panel()
+
         except Exception as e:
             if getattr(self, "lbl_chat_status", None):
                 self.lbl_chat_status.setText(f"❌ Lỗi gửi video: {e}")
@@ -2215,3 +2235,20 @@ class ChatWindow(QMainWindow):
         if action == "list_attachments":
             self._handle_attachments_result(data)
         # có thể thêm xử lý cho các action khác nếu cần thiết
+    def reload_info_panel(self):
+            """Tự động reload info panel nếu đang mở."""
+            if not hasattr(self, "list_attachments"):
+                return
+
+            # phải đang mở tab info
+            if not self.list_attachments.isVisible():
+                return
+
+            kind = self.current_attachments_kind
+            if not kind:
+                return
+
+            try:
+                self.on_show_attachments(kind)
+            except Exception:
+                pass
