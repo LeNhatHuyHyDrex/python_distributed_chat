@@ -684,26 +684,59 @@ def handle_client(conn: socket.socket, addr):
 
 
             elif action == "list_attachments":
+                # ...existing code for private attachments...
                 username_req = data.get("username")
                 partner_username = data.get("partner")
                 filter_kind = (data.get("filter") or "media").lower()
 
-                user = get_user_by_username(username_req)
-                partner = get_user_by_username(partner_username)
+                # --- New: support group attachments by conversation_id ---
+                conv_id_raw = data.get("conversation_id")
+                if conv_id_raw:
+                    try:
+                        conv_id = int(conv_id_raw)
+                    except (TypeError, ValueError):
+                        send_to_conn(conn, "attachments_result", {
+                            "ok": False,
+                            "error": "Invalid conversation id"
+                        })
+                        continue
 
-                if not user or not partner:
-                    send_to_conn(conn, "attachments_result", {
-                        "ok": False,
-                        "error": "User not found"
-                    })
-                    continue
+                    user = get_user_by_username(username_req)
+                    if not user:
+                        send_to_conn(conn, "attachments_result", {
+                            "ok": False,
+                            "error": "User not found"
+                        })
+                        continue
 
-                conv_id = get_or_create_private_conversation(
-                    user["id"], partner["id"]
-                )
+                    # kiểm tra user có trong group không
+                    if not is_user_in_conversation(conv_id, user["id"]):
+                        send_to_conn(conn, "attachments_result", {
+                            "ok": False,
+                            "error": "Bạn không thuộc nhóm này"
+                        })
+                        continue
 
-                msgs = get_messages_for_conversation(conv_id, limit=1000) or []
+                    msgs = get_messages_for_conversation(conv_id, limit=1000) or []
+                else:
+                    # existing private handling
+                    user = get_user_by_username(username_req)
+                    partner = get_user_by_username(partner_username)
 
+                    if not user or not partner:
+                        send_to_conn(conn, "attachments_result", {
+                            "ok": False,
+                            "error": "User not found"
+                        })
+                        continue
+
+                    conv_id = get_or_create_private_conversation(
+                        user["id"], partner["id"]
+                    )
+
+                    msgs = get_messages_for_conversation(conv_id, limit=1000) or []
+
+                # ...existing is_match + building items code...
                 def is_match(m):
                     t = (m.get("msg_type") or "text").lower()
                     c = (m.get("content") or "")
@@ -739,278 +772,185 @@ def handle_client(conn: socket.socket, addr):
                 send_to_conn(conn, "attachments_result", {
                     "ok": True,
                     "filter": filter_kind,
-                    "partner": partner_username,
+                    # partner may be None for group
+                    "partner": partner_username if not conv_id_raw else None,
                     "items": items,
                 })
-            elif action == "create_group":
-                owner_username = (data.get("owner") or "").strip()
-                group_name = (data.get("name") or "").strip()
-                member_usernames = data.get("members") or []  # list[str]
 
-                owner = get_user_by_username(owner_username)
-                if not owner:
-                    send_to_conn(conn, "create_group_result", {
-                        "ok": False,
-                        "error": "Owner not found",
-                    })
-                    continue
-
-                # đảm bảo owner luôn trong nhóm
-                all_usernames = set(member_usernames)
-                all_usernames.add(owner_username)
-
-                member_ids = []
-                for uname in all_usernames:
-                    u = get_user_by_username(uname)
-                    if not u:
-                        send_to_conn(conn, "create_group_result", {
-                            "ok": False,
-                            "error": f"User not found: {uname}",
-                        })
-                        break
-                    member_ids.append(u["id"])
-                else:
-                    # nếu không break
-                    conv_id = create_group_conversation(group_name, owner["id"], member_ids)
-
-
-                    # thông báo cho tất cả member đang online
-                    for uname in all_usernames:
-                        if uname in clients:
-                            send_to_conn(clients[uname], "group_created", {
-                                "ok": True,
-                                "conversation_id": conv_id,
-                                "group_name": group_name,
-                            })
-
-                    # trả về cho thằng tạo
-                    send_to_conn(conn, "create_group_result", {
-                        "ok": True,
-                        "conversation_id": conv_id,
-                        "group_name": group_name,
-                    })
-            elif action == "send_group_text":
-                from_username = data.get("from")
+            # ----- SEND TO GROUP: image / file/video -----
+            elif action == "send_group_image":
                 conv_id = int(data.get("conversation_id") or 0)
-                content = data.get("content") or ""
+                sender = data.get("from")
+                filename = data.get("filename")
+                b64data = data.get("data")
 
-                user_from = get_user_by_username(from_username)
-                if not user_from:
-                    send_to_conn(conn, "send_group_text_result", {
-                        "ok": False,
-                        "error": "User not found",
-                    })
-                    continue
-
-                # check có trong group không
-                if not is_user_in_conversation(conv_id, user_from["id"]):
-                    send_to_conn(conn, "send_group_text_result", {
-                        "ok": False,
-                        "error": "You are not in this group",
-                    })
-                    continue
-
-                msg_id = insert_message(conv_id, user_from["id"], "text", content)
-
-                members = get_members_of_conversation(conv_id)
-                for m in members:
-                    uname = m["username"]
-                    # không gửi lại cho chính mình
-                    if uname in clients and uname != from_username:
-                        send_to_conn(clients[uname], "incoming_group_text", {
-                            "conversation_id": conv_id,
-                            "from": from_username,
-                            "content": content,
-                            "message_id": msg_id,
-                        })
-
-                send_to_conn(conn, "send_group_text_result", {
-                    "ok": True,
-                    "conversation_id": conv_id,
-                    "content": content,
-                    "message_id": msg_id,
-                })
-            elif action == "add_group_member":
-                by_username = (data.get("by") or "").strip()
-                conv_id = int(data.get("conversation_id") or 0)
-                target_username = (data.get("username") or "").strip()
-
-                requester = get_user_by_username(by_username)
-                target = get_user_by_username(target_username)
-
-                if not requester or not target:
-                    send_to_conn(conn, "add_group_member_result", {
-                        "ok": False,
-                        "error": "User not found",
-                    })
-                    continue
-
-                if not is_user_in_conversation(conv_id, requester["id"]):
-                    send_to_conn(conn, "add_group_member_result", {
-                        "ok": False,
-                        "error": "Bạn không thuộc nhóm này",
-                    })
-                    continue
-
-                if is_user_in_conversation(conv_id, target["id"]):
-                    send_to_conn(conn, "add_group_member_result", {
-                        "ok": False,
-                        "error": "User đã ở trong nhóm",
-                    })
-                    continue
-
-                added = add_user_to_conversation(conv_id, target["id"])
-                if added:
-                    # thông báo cho người được thêm nếu đang online
-                    if target_username in clients:
-                        send_to_conn(clients[target_username], "group_created", {
-                            "ok": True,
-                            "conversation_id": conv_id,
-                            "group_name": f"{conv_id}",
-                        })
-                    send_to_conn(conn, "add_group_member_result", {
-                        "ok": True,
-                        "conversation_id": conv_id,
-                        "username": target_username,
-                    })
-                else:
-                    send_to_conn(conn, "add_group_member_result", {
-                        "ok": False,
-                        "error": "Không thêm được user vào nhóm",
-                    })
-
-            elif action == "leave_group":
-                by_username = (data.get("by") or "").strip()
-                conv_id = int(data.get("conversation_id") or 0)
-
-                user_by = get_user_by_username(by_username)
-                if not user_by:
-                    send_to_conn(conn, "leave_group_result", {
-                        "ok": False,
-                        "error": "User not found",
-                    })
-                    continue
-
-                if not is_user_in_conversation(conv_id, user_by["id"]):
-                    send_to_conn(conn, "leave_group_result", {
-                        "ok": False,
-                        "error": "Bạn không thuộc nhóm này",
-                    })
-                    continue
-
-                members = get_members_of_conversation(conv_id) or []
-                if members:
-                    owner_id = members[0]["id"]   # tạm coi member có id nhỏ nhất là chủ nhóm
-                    if user_by["id"] == owner_id:
-                        send_to_conn(conn, "leave_group_result", {
-                            "ok": False,
-                            "error": "Người tạo nhóm không được rời nhóm.",
-                        })
-                        continue
-
-                removed = remove_user_from_conversation(conv_id, user_by["id"])
-                if removed:
-                    send_to_conn(conn, "leave_group_result", {
-                        "ok": True,
-                        "conversation_id": conv_id,
-                    })
-                else:
-                    send_to_conn(conn, "leave_group_result", {
-                        "ok": False,
-                        "error": "Không rời nhóm được",
-                    })
-
-            elif action == "join_group_by_name":
-                username_req = (data.get("username") or "").strip()
-                group_name = (data.get("name") or "").strip()
-
-                user = get_user_by_username(username_req)
+                user = get_user_by_username(sender)
                 if not user:
-                    send_to_conn(conn, "join_group_result", {
+                    send_to_conn(conn, "send_group_image_result", {
                         "ok": False,
                         "error": "User not found",
                     })
                     continue
 
-                group = find_group_by_name(group_name)
-                if not group:
-                    send_to_conn(conn, "join_group_result", {
+                # kiểm tra user thuộc group
+                if not is_user_in_conversation(conv_id, user["id"]):
+                    send_to_conn(conn, "send_group_image_result", {
                         "ok": False,
-                        "error": "Không tìm thấy nhóm",
+                        "error": "Bạn không thuộc nhóm này",
                     })
                     continue
-
-                conv_id = group["id"]
-                if not is_user_in_conversation(conv_id, user["id"]):
-                    add_user_to_conversation(conv_id, user["id"])
-
-                send_to_conn(conn, "join_group_result", {
-                    "ok": True,
-                    "conversation_id": conv_id,
-                    "group_name": group["name"],
-                })
-
-            # ----- Xóa nhóm (chỉ owner được phép) -----
-            elif action == "delete_group":
-                conv_id_raw = data.get("conversation_id")
-                by_username = (data.get("by") or "").strip()
 
                 try:
-                    conv_id = int(conv_id_raw)
-                except (TypeError, ValueError):
-                    send_to_conn(conn, "delete_group_result", {
+                    raw = base64.b64decode(b64data)
+                except Exception:
+                    send_to_conn(conn, "send_group_image_result", {
                         "ok": False,
-                        "error": "Invalid conversation id",
+                        "error": "Invalid base64 data",
                     })
                     continue
 
-                user_by = get_user_by_username(by_username)
-                if not user_by:
-                    send_to_conn(conn, "delete_group_result", {
+                safe_name = f"group_{conv_id}_{user['id']}_{filename}"
+                full_path = IMAGES_DIR / safe_name
+                try:
+                    with open(full_path, "wb") as f:
+                        f.write(raw)
+                except Exception as e:
+                    send_to_conn(conn, "send_group_image_result", {
                         "ok": False,
-                        "error": "User not found",
+                        "error": str(e),
                     })
                     continue
 
-                # Lấy danh sách members (username) trước khi xóa để gửi thông báo
+                msg_id = insert_message(conv_id, user["id"], "image", safe_name)
+
+                # phản hồi cho người gửi
+                send_to_conn(conn, "send_group_image_result", {
+                    "ok": True,
+                    "conversation_id": conv_id,
+                    "filename": safe_name,
+                    "message_id": msg_id,
+                })
+
+                # broadcast realtime tới member khác
                 try:
                     members = get_members_of_conversation(conv_id) or []
                 except Exception:
                     members = []
 
-                try:
-                    deleted = delete_group(conv_id, user_by["id"])
-                except Exception as e:
-                    print(f"[SERVER] delete_group error: {e}")
-                    deleted = False
+                for m in members:
+                    uname = m.get("username")
+                    if not uname or uname == sender:
+                        continue
+                    if uname in clients:
+                        try:
+                            send_to_conn(clients[uname], "incoming_group_image", {
+                                "conversation_id": conv_id,
+                                "from": sender,
+                                "filename": safe_name,
+                                "message_id": msg_id,
+                            })
+                        except Exception:
+                            pass
 
-                if deleted:
-                    # Trả kết quả cho requester
-                    send_to_conn(conn, "delete_group_result", {
-                        "ok": True,
-                        "conversation_id": conv_id,
-                    })
+            elif action == "send_group_file":
+                conv_id = int(data.get("conversation_id") or 0)
+                sender = data.get("from")
+                filename = data.get("filename")
+                b64data = data.get("data")
+                file_type = (data.get("file_type") or "file").lower()
 
-                    # Thông báo tới tất cả thành viên online để họ refresh sidebar / clear UI
-                    for m in members:
-                        uname = m.get("username") or m.get("user_id")  # đảm bảo lấy username nếu có
-                        if not isinstance(uname, str):
-                            continue
-                        if uname in clients:
-                            try:
-                                send_to_conn(clients[uname], "group_deleted", {
-                                    "conversation_id": conv_id,
-                                })
-                            except Exception:
-                                pass
-                else:
-                    send_to_conn(conn, "delete_group_result", {
+                user = get_user_by_username(sender)
+                if not user:
+                    send_to_conn(conn, "send_group_file_result", {
                         "ok": False,
-                        "error": "Group not found or not owner",
+                        "error": "User not found",
                     })
+                    continue
 
-            # sau này thêm: gửi file, hình ảnh, nhóm, voice, video...
+                if not is_user_in_conversation(conv_id, user["id"]):
+                    send_to_conn(conn, "send_group_file_result", {
+                        "ok": False,
+                        "error": "Bạn không thuộc nhóm này",
+                    })
+                    continue
 
+                try:
+                    raw = base64.b64decode(b64data)
+                except Exception:
+                    send_to_conn(conn, "send_group_file_result", {
+                        "ok": False,
+                        "error": "Invalid base64 data",
+                    })
+                    continue
+
+                if file_type == "video":
+                    folder = VIDEOS_DIR
+                    msg_type = "video"
+                elif file_type == "image":
+                    folder = IMAGES_DIR
+                    msg_type = "image"
+                else:
+                    folder = FILES_DIR
+                    msg_type = "file"
+
+                safe_name = f"group_{conv_id}_{user['id']}_{filename}"
+                full_path = folder / safe_name
+
+                try:
+                    with open(full_path, "wb") as f:
+                        f.write(raw)
+                except Exception as e:
+                    send_to_conn(conn, "send_group_file_result", {
+                        "ok": False,
+                        "error": str(e),
+                    })
+                    continue
+
+                msg_id = insert_message(conv_id, user["id"], msg_type, safe_name)
+
+                send_to_conn(conn, "send_group_file_result", {
+                    "ok": True,
+                    "conversation_id": conv_id,
+                    "filename": safe_name,
+                    "file_type": file_type,
+                    "message_id": msg_id,
+                })
+
+                try:
+                    members = get_members_of_conversation(conv_id) or []
+                except Exception:
+                    members = []
+
+                for m in members:
+                    uname = m.get("username")
+                    if not uname or uname == sender:
+                        continue
+                    if uname in clients:
+                        try:
+                            if file_type == "video":
+                                send_to_conn(clients[uname], "incoming_group_video", {
+                                    "conversation_id": conv_id,
+                                    "from": sender,
+                                    "filename": safe_name,
+                                    "message_id": msg_id,
+                                })
+                            elif file_type == "image":
+                                send_to_conn(clients[uname], "incoming_group_image", {
+                                    "conversation_id": conv_id,
+                                    "from": sender,
+                                    "filename": safe_name,
+                                    "message_id": msg_id,
+                                })
+                            else:
+                                send_to_conn(clients[uname], "incoming_group_file", {
+                                    "conversation_id": conv_id,
+                                    "from": sender,
+                                    "filename": safe_name,
+                                    "message_id": msg_id,
+                                })
+                        except Exception:
+                            pass
+    # end of big while/try handling client: add missing except/finally and main()
     except Exception as e:
         print("Error while handling client:", e)
     finally:
