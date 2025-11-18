@@ -1412,6 +1412,12 @@ class ChatWindow(QMainWindow):
                         path = str(videos_dir / content)
                     elif msg_type == "file":
                         path = str(files_dir / content)
+                    elif filter_kind == "links":
+                        link_url = self._extract_first_url(content) or content
+                        if not link_url:
+                            continue
+                        msg_type = "link"
+                        content = link_url
 
                     item.setData(Qt.ItemDataRole.UserRole, {
                         "id": msg_id,
@@ -2027,6 +2033,7 @@ class ChatWindow(QMainWindow):
         ans = QMessageBox.question(
             self,
             "Rời nhóm",
+           
             "Bạn có chắc muốn rời nhóm hiện tại?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2252,3 +2259,26 @@ class ChatWindow(QMainWindow):
                 self.on_show_attachments(kind)
             except Exception:
                 pass
+
+    def _open_link(self, url: str):
+        url = (url or "").strip()
+        if not url:
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("⚠️ Link trống")
+            return
+
+        if not re.match(r"^[a-z]+://", url, re.IGNORECASE):
+            url = "http://" + url
+
+        qurl = QUrl(url)
+        if not qurl.isValid():
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("❌ Link không hợp lệ")
+            return
+
+        if QDesktopServices.openUrl(qurl):
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText(f"🌐 Đang mở: {qurl.toString()}")
+        else:
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("❌ Không mở được link")
