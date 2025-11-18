@@ -424,23 +424,54 @@ def handle_client(conn: socket.socket, addr):
 
 
             elif action == "delete_message":
-                by_username = data.get("by")
-                partner_username = data.get("partner")
+                by_username = (data.get("by") or "").strip()
                 message_id = data.get("message_id")
+                conv_id_raw = data.get("conversation_id")
+                partner_username = (data.get("partner") or "").strip()
 
                 user_by = get_user_by_username(by_username)
-                user_partner = (
-                    get_user_by_username(partner_username)
-                    if partner_username
-                    else None
-                )
-
-                if not user_by or not user_partner:
+                if not user_by:
                     send_to_conn(conn, "delete_result", {
                         "ok": False,
                         "error": "User not found",
                     })
                     continue
+
+                if conv_id_raw:
+                    try:
+                        conv_id = int(conv_id_raw)
+                    except (TypeError, ValueError):
+                        send_to_conn(conn, "delete_result", {
+                            "ok": False,
+                            "error": "Invalid conversation id",
+                        })
+                        continue
+                    if not is_user_in_conversation(conv_id, user_by["id"]):
+                        send_to_conn(conn, "delete_result", {
+                            "ok": False,
+                            "error": "Bạn không thuộc đoạn chat này",
+                        })
+                        continue
+                    partner_user = None
+                    is_group = True
+                else:
+                    if not partner_username:
+                        send_to_conn(conn, "delete_result", {
+                            "ok": False,
+                            "error": "Thiếu partner để xác định đoạn chat",
+                        })
+                        continue
+                    partner_user = get_user_by_username(partner_username)
+                    if not partner_user:
+                        send_to_conn(conn, "delete_result", {
+                            "ok": False,
+                            "error": "Partner not found",
+                        })
+                        continue
+                    conv_id = get_or_create_private_conversation(
+                        user_by["id"], partner_user["id"]
+                    )
+                    is_group = False
 
                 try:
                     message_id_int = int(message_id)
@@ -451,45 +482,33 @@ def handle_client(conn: socket.socket, addr):
                     })
                     continue
 
-                # Tìm conversation + lấy thông tin tin nhắn trước khi xóa
-                conv_id = get_or_create_private_conversation(
-                    user_by["id"], user_partner["id"]
-                )
                 msg_row = get_message_by_id(conv_id, message_id_int)
-
                 deleted = delete_message_for_user(
                     conv_id, message_id_int, user_by["id"]
                 )
 
                 if deleted:
-                    # Nếu là image/video/file thì xóa luôn file trên ổ
                     if msg_row:
                         msg_type = (msg_row.get("msg_type") or "").lower()
                         content = msg_row.get("content") or ""
-
                         dir_path = None
-                        if msg_type == "image":
+                        if msg_type in ("image", "photo"):
                             dir_path = IMAGES_DIR
                         elif msg_type == "video":
                             dir_path = VIDEOS_DIR
                         elif msg_type in ("file", "document"):
                             dir_path = FILES_DIR
-
                         if dir_path and content:
-                            file_path = dir_path / content
                             try:
-                                import os
-                                os.remove(file_path)
-                                print(f"[SERVER] Đã xóa file: {file_path}")
+                                os.remove(dir_path / content)
                             except FileNotFoundError:
-                                # File không còn cũng không sao
                                 pass
-                            except Exception as e:
-                                print(f"[SERVER] Không xóa được file {file_path}: {e}")
-
                     send_to_conn(conn, "delete_result", {
                         "ok": True,
                         "message_id": message_id_int,
+                        "conversation_id": conv_id,
+                        "is_group": is_group,
+                        "partner": partner_username if not is_group else None,
                     })
                 else:
                     send_to_conn(conn, "delete_result", {
@@ -751,18 +770,6 @@ def handle_client(conn: socket.socket, addr):
                         return "http://" in cl or "https://" in cl
                     return False
 
-                def resolve_path(msg_type: str, filename: str) -> str:
-                    if not filename:
-                        return ""
-                    t = msg_type.lower()
-                    if t in ("image", "photo"):
-                        return str((IMAGES_DIR / filename).resolve())
-                    if t in ("video", "audio"):
-                        return str((VIDEOS_DIR / filename).resolve())
-                    if t in ("file", "document"):
-                        return str((FILES_DIR / filename).resolve())
-                    return ""
-
                 items = []
                 for m in msgs:
                     if not is_match(m):
@@ -774,19 +781,17 @@ def handle_client(conn: socket.socket, addr):
                         )
                     else:
                         created_str = str(created_at) if created_at is not None else ""
-                    msg_type = (m.get("msg_type") or "text")
-                    filename = m.get("content") or ""
                     items.append({
                         "id": m.get("id"),
-                        "msg_type": msg_type,
-                        "content": filename,
+                        "msg_type": m.get("msg_type"),
+                        "content": m.get("content"),
                         "created_at": created_str,
-                        "path": resolve_path(msg_type, filename),
                     })
 
                 send_to_conn(conn, "attachments_result", {
                     "ok": True,
                     "filter": filter_kind,
+                    # partner may be None for group
                     "partner": partner_username if not conv_id_raw else None,
                     "items": items,
                 })
