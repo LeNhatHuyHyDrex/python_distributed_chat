@@ -384,3 +384,340 @@ def delete_conversation_for_users(user1_id: int, user2_id: int) -> bool:
 
     return True
 # ====== Avatar ======
+def create_group_conversation(name: str, member_ids: list[int]) -> int:
+    """
+    Tạo conversation nhóm (is_group = 1) và thêm tất cả member vào conversation_members.
+    Lưu ở node DB_NODES[0] giống 1-1.
+    """
+    if not member_ids:
+        raise ValueError("member_ids rỗng")
+
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            # tạo conversations
+            cur.execute(
+                "INSERT INTO conversations (is_group, name) VALUES (1, %s)",
+                (name,),
+            )
+            conv_id = cur.lastrowid
+
+            # thêm thành viên
+            unique_ids = set(member_ids)
+            for uid in unique_ids:
+                cur.execute(
+                    "INSERT INTO conversation_members (conversation_id, user_id) VALUES (%s, %s)",
+                    (conv_id, uid),
+                )
+
+        conn.commit()
+        return conv_id
+    finally:
+        conn.close()
+def get_groups_for_user(user_id: int):
+    """
+    Lấy các conversation là nhóm mà user này tham gia,
+    kèm luôn group_avatar (base64) và thời gian tin mới nhất.
+    """
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.id           AS conversation_id,
+                    c.name         AS group_name,
+                    c.group_avatar AS group_avatar,
+                    MAX(m.created_at) AS last_time
+                FROM conversations c
+                JOIN conversation_members cm
+                    ON cm.conversation_id = c.id
+                   AND cm.user_id = %s
+                LEFT JOIN messages m
+                    ON m.conversation_id = c.id
+                WHERE c.is_group = 1
+                GROUP BY c.id, c.name, c.group_avatar
+                ORDER BY last_time IS NULL, last_time DESC, c.id DESC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            for r in rows:
+                lt = r.get("last_time")
+                if hasattr(lt, "isoformat"):
+                    r["last_time"] = lt.isoformat(sep=" ", timespec="seconds")
+                elif lt is not None:
+                    r["last_time"] = str(lt)
+            return rows
+    finally:
+        conn.close()
+
+
+
+def is_user_in_conversation(conv_id: int, user_id: int) -> bool:
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM conversation_members
+                WHERE conversation_id = %s AND user_id = %s
+                LIMIT 1
+                """,
+                (conv_id, user_id),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def get_members_of_conversation(conv_id: int):
+    """
+    Trả về list các user tham gia conv: [{user_id, username}, ...]
+    """
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.id AS user_id, u.username
+                FROM conversation_members cm
+                JOIN users u ON u.id = cm.user_id
+                WHERE cm.conversation_id = %s
+                """,
+                (conv_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+def get_members_of_conversation(conversation_id: int):
+    """
+    Lấy danh sách member của 1 conversation (group hoặc 1-1).
+    """
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.id, u.username, u.display_name
+                FROM conversation_members cm
+                JOIN users u ON u.id = cm.user_id
+                WHERE cm.conversation_id = %s
+                ORDER BY u.id ASC
+                """,
+                (conversation_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def create_group_conversation(group_name: str, owner_id: int, member_ids: list[int]) -> int:
+    """
+    Tạo 1 conversation nhóm, thêm toàn bộ member.
+    Lưu owner_id + group_avatar=NULL.
+    """
+    if not member_ids:
+        raise ValueError("member_ids rỗng")
+
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO conversations (is_group, name, owner_id, group_avatar)
+                VALUES (1, %s, %s, NULL)
+                """,
+                (group_name, owner_id),
+            )
+            conv_id = cur.lastrowid
+
+            for uid in member_ids:
+                cur.execute(
+                    """
+                    INSERT INTO conversation_members (conversation_id, user_id)
+                    VALUES (%s, %s)
+                    """,
+                    (conv_id, uid),
+                )
+        conn.commit()
+        return conv_id
+    finally:
+        conn.close()
+
+
+
+
+def is_user_in_conversation(conversation_id: int, user_id: int) -> bool:
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM conversation_members
+                WHERE conversation_id = %s AND user_id = %s
+                LIMIT 1
+                """,
+                (conversation_id, user_id),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def add_user_to_conversation(conversation_id: int, user_id: int) -> bool:
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            # dùng INSERT IGNORE để tránh lỗi trùng key
+            cur.execute(
+                """
+                INSERT IGNORE INTO conversation_members (conversation_id, user_id)
+                VALUES (%s, %s)
+                """,
+                (conversation_id, user_id),
+            )
+            affected = cur.rowcount
+        conn.commit()
+        return affected > 0
+    finally:
+        conn.close()
+
+
+def remove_user_from_conversation(conversation_id: int, user_id: int) -> bool:
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM conversation_members
+                WHERE conversation_id = %s AND user_id = %s
+                """,
+                (conversation_id, user_id),
+            )
+            affected = cur.rowcount
+        conn.commit()
+        return affected > 0
+    finally:
+        conn.close()
+
+
+def find_group_by_name(group_name: str):
+    """
+    Tìm 1 group theo tên.
+    """
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name
+                FROM conversations
+                WHERE is_group = 1 AND name = %s
+                LIMIT 1
+                """,
+                (group_name,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+def update_group_avatar(conversation_id: int, avatar_b64: str):
+    """
+    Cập nhật avatar cho group (lưu base64 string vào conversations.group_avatar).
+    """
+    node_cfg = select_node_for_conversation(conversation_id)
+    conn = get_connection(node_cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversations SET group_avatar = %s WHERE id = %s",
+                (avatar_b64, conversation_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_group(conversation_id: int, owner_id: int) -> bool:
+    """
+    Xóa toàn bộ 1 group (messages, members, conversation) chỉ khi owner_id trùng owner của group.
+    Trả về True nếu xóa thành công, False nếu không tìm thấy hoặc không phải owner.
+    """
+    # kiểm tra owner trên node trung tâm
+    node0 = DB_NODES[0]
+    conn0 = get_connection(node0)
+    try:
+        with conn0.cursor() as cur:
+            cur.execute(
+                "SELECT owner_id FROM conversations WHERE id = %s AND is_group = 1",
+                (conversation_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            if row.get("owner_id") != owner_id:
+                return False
+    finally:
+        conn0.close()
+
+    # xóa messages trên node chứa messages
+    node_msg = select_node_for_conversation(conversation_id)
+    conn_msg = get_connection(node_msg)
+    try:
+        with conn_msg.cursor() as cur:
+            cur.execute(
+                "DELETE FROM messages WHERE conversation_id = %s",
+                (conversation_id,),
+            )
+        conn_msg.commit()
+    finally:
+        conn_msg.close()
+
+    # xóa conversation_members + conversation ở node trung tâm
+    conn0 = get_connection(node0)
+    try:
+        with conn0.cursor() as cur:
+            cur.execute(
+                "DELETE FROM conversation_members WHERE conversation_id = %s",
+                (conversation_id,),
+            )
+            cur.execute(
+                "DELETE FROM conversations WHERE id = %s",
+                (conversation_id,),
+            )
+        conn0.commit()
+    finally:
+        conn0.close()
+
+    return True
+def get_conversation_owner(conversation_id: int):
+    """
+    Trả về owner_id của conversation (chỉ hợp lệ cho group).
+    Trả về None nếu không tìm thấy hoặc không có owner.
+    """
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT owner_id FROM conversations WHERE id = %s AND is_group = 1",
+                (conversation_id,),
+            )
+            row = cur.fetchone()
+            return row.get("owner_id") if row else None
+    finally:
+        conn.close()
+
+

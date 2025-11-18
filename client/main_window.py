@@ -10,8 +10,10 @@ from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QMessageBox, QFileDialog,
     QDialog, QVBoxLayout, QLabel, QListWidgetItem,
-    QHBoxLayout, QPushButton, QSlider
+    QHBoxLayout, QPushButton, QSlider, QInputDialog
 )
+
+
 
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
@@ -210,9 +212,17 @@ class ChatWindow(QMainWindow):
         self.current_display_name: str | None = None
         self.current_partner_username: str | None = None
         self.conversations: list[dict[str, Any]] = []
-
+        self.current_group_id: int | None = None
+        self.current_group_is_owner: bool = False
+        # cache avatar user: (username, size) -> QPixmap
+        self._user_avatar_cache: dict[tuple[str, int], QPixmap] = {}
+         # cache avatar tròn nhỏ cho từng username, dùng trong group chat
+        self._avatar_cache: dict[str, QPixmap] = {}
         # Dựng UI
         setup_chatwindow_ui(self)
+                # Ẩn nút tạo nhóm khi chưa đăng nhập
+        if hasattr(self, "btn_create_group"):
+            self.btn_create_group.setVisible(False)
 
         # Lưu avatar mặc định (từ assets/default_avatar.png)
         self.default_avatar_small = getattr(self, "avatar_small", None)
@@ -278,7 +288,34 @@ class ChatWindow(QMainWindow):
 
     def _connect_signals(self):
         # Auth
+        # Chat
+        self.btn_send.clicked.connect(self.on_send_clicked)
+        self.le_message.returnPressed.connect(self.on_send_clicked)
+        if hasattr(self, "btn_leave_group"):
+            self.btn_leave_group.clicked.connect(self.on_leave_group_clicked)
+        
+        if hasattr(self, "btn_create_group"):
+            self.btn_create_group.clicked.connect(self.on_create_group_clicked)
+
+        if hasattr(self, "btn_send_image"):
+            self.btn_send_image.clicked.connect(self.on_send_image_clicked)
+        if hasattr(self, "btn_send_file"):
+            self.btn_send_file.clicked.connect(self.on_send_file_clicked)
+        if hasattr(self, "btn_send_video"):
+            self.btn_send_video.clicked.connect(self.on_send_video_clicked)
+
+        if hasattr(self, "lbl_partner_avatar") and hasattr(self.lbl_partner_avatar, "clicked"):
+            self.lbl_partner_avatar.clicked.connect(self.on_change_group_avatar_clicked)
+
         self.btn_login.clicked.connect(self.on_login_clicked)
+        self.sidebar.conversation_selected.connect(self.on_sidebar_conversation_selected)
+        self.sidebar.search_text_changed.connect(self.on_sidebar_search_changed)
+        if hasattr(self.sidebar, "user_add_to_group"):
+            self.sidebar.user_add_to_group.connect(self.on_add_user_to_group)
+
+        if hasattr(self.sidebar, "join_group_requested"):
+            self.sidebar.join_group_requested.connect(self.on_join_group_requested)
+
         self.btn_register.clicked.connect(self.on_register_clicked)
         self.btn_show_login.clicked.connect(
             lambda: self.auth_stack.setCurrentIndex(0)
@@ -336,6 +373,12 @@ class ChatWindow(QMainWindow):
                 lambda: self.on_show_attachments("links")
             )
 
+                # Click avatar ở info panel -> đổi avatar nhóm (nếu là chủ nhóm)
+        if hasattr(self, "lbl_partner_avatar"):
+            try:
+                self.lbl_partner_avatar.mousePressEvent = self._on_group_avatar_clicked
+            except Exception:
+                pass
 
         # Click vào avatar profile để đổi ảnh
         if hasattr(self, "lbl_profile_avatar") and hasattr(self.lbl_profile_avatar, "clicked"):
@@ -353,6 +396,41 @@ class ChatWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _get_avatar_for_username(self, username: str):
+        """
+        Lấy avatar tròn 28px cho một username (dùng cho bubble group).
+        Ưu tiên cache, sau đó lấy từ self.conversations.
+        """
+        if not username:
+            return None
+
+        # chính mình
+        if username == self.current_username and getattr(self, "avatar_small", None):
+            return self.avatar_small
+
+        if username in self._avatar_cache:
+            return self._avatar_cache[username]
+
+        avatar_b64 = None
+        for conv in self.conversations:
+            if conv.get("partner_username") == username:
+                avatar_b64 = conv.get("avatar_b64") or conv.get("partner_avatar_url")
+                break
+
+        if not avatar_b64:
+            return None
+
+        try:
+            raw = base64.b64decode(avatar_b64)
+            pix = QPixmap()
+            if pix.loadFromData(raw) and not pix.isNull():
+                rounded = self._make_round_avatar(pix, 28)
+                self._avatar_cache[username] = rounded
+                return rounded
+        except Exception:
+            return None
+
+        return None
 
 
     # ---------- NETWORK ----------
@@ -491,11 +569,19 @@ class ChatWindow(QMainWindow):
         content = self.le_message.text().strip()
         if not to_user or not content:
             return
-        pkt = make_packet("send_text", {
-            "from": self.current_username,
-            "to": to_user,
-            "content": content
-        })
+        if self.current_group_id:
+            pkt = make_packet("send_group_text", {
+                "from": self.current_username,
+                "conversation_id": self.current_group_id,
+                "content": content,
+            })
+        else:
+            pkt = make_packet("send_text", {
+                "from": self.current_username,
+                "to": self.current_partner_username,
+                "content": content,
+            })
+
         try:
             self.sock.sendall(pkt)
             self.le_message.clear()
@@ -521,6 +607,8 @@ class ChatWindow(QMainWindow):
             self.lbl_chat_status.setText(f"❌ Lỗi yêu cầu lịch sử: {e}")
 
     def on_logout_clicked(self):
+        if hasattr(self, "btn_create_group"):
+            self.btn_create_group.setVisible(False)
         if not self.current_username:
             return
         username = self.current_username
@@ -529,6 +617,7 @@ class ChatWindow(QMainWindow):
             self.sock.sendall(pkt)
         except OSError:
             pass
+        self.btn_create_group.setVisible(False)
 
         self.current_username = None
         self.current_display_name = None
@@ -583,7 +672,42 @@ class ChatWindow(QMainWindow):
         """
         Xử lý nút 'Xóa đoạn chat' trong info panel (bên phải).
         Xóa sạch lịch sử giữa 2 user và đoạn chat biến khỏi sidebar.
+        Nếu đang ở group và là chủ nhóm -> hỏi xác nhận và xóa nhóm.
         """
+        # Nếu đang ở group
+        if self.current_group_id:
+            # Nếu không phải owner -> thông báo hướng dẫn rời nhóm
+            if not self.current_group_is_owner:
+                QMessageBox.information(
+                    self,
+                    "Thông báo",
+                    "Chỉ chủ nhóm mới có quyền xóa nhóm. Thành viên có thể rời nhóm."
+                )
+                return
+
+            # Chủ nhóm -> hỏi xác nhận xóa nhóm
+            ans = QMessageBox.question(
+                self,
+                "Xóa nhóm",
+                "Bạn có chắc muốn xóa hoàn toàn nhóm này? Hành động này không thể hoàn tác.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+            pkt = make_packet("delete_group", {
+                "conversation_id": self.current_group_id,
+                "by": self.current_username,
+            })
+            try:
+                self.sock.sendall(pkt)
+                self.lbl_chat_status.setText("⏳ Đang xóa nhóm...")
+            except OSError as e:
+                self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu xóa nhóm: {e}")
+            return
+
+        # --- Xóa đoạn chat 1-1 như cũ ---
         if not self.current_username:
             self.lbl_chat_status.setText("⚠️ Chưa đăng nhập")
             return
@@ -612,21 +736,121 @@ class ChatWindow(QMainWindow):
         except OSError as e:
             self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu xóa đoạn chat: {e}")
 
-    def on_sidebar_conversation_selected(self, partner_username: str):
-        """
-        Khi click 1 item trong sidebar.
-        """
-        partner_username = (partner_username or "").strip()
-        if not partner_username:
+    def on_sidebar_conversation_selected(self, key: str):
+        key = (key or "").strip()
+        if not key:
             return
-        self.current_partner_username = partner_username
-        self.le_to_user.setText(partner_username)
 
-        if hasattr(self.sidebar, "set_active_username"):
-            self.sidebar.set_active_username(partner_username)
+        if key.startswith("user:"):
+            username = key.split(":", 1)[1]
+            self.current_partner_username = username
+            self.current_group_id = None
 
-        self._update_info_panel(partner_username)
-        self.on_load_history_clicked()
+            self.le_to_user.setText(username)
+            if hasattr(self.sidebar, "set_active_username"):
+                self.sidebar.set_active_username(username)
+
+            self._update_info_panel(username)
+            self.on_load_history_clicked()
+
+        elif key.startswith("group:"):
+            conv_id = int(key.split(":", 1)[1])
+            self.current_partner_username = None
+
+            # Set current_group_id ngay khi user chọn group; giữ giá trị này
+            # tới khi server trả group_history_result (trong đó có is_owner)
+            self.current_group_id = conv_id
+
+            self.le_to_user.setText(f"[Group] {conv_id}")
+            self._update_group_info_panel(conv_id)
+
+            # Gửi request lịch sử — khi server trả group_history_result sẽ cập nhật
+            # current_group_is_owner từ trường "is_owner" trả về.
+            self.request_group_history(conv_id)
+
+            # Không reset current_group_id ở đây nữa
+
+    def _update_group_info_panel(self, conv_id: int):
+        """
+        Hiển thị info panel cho nhóm: tên + avatar nhóm, ẩn/hiện nút rời/xoá.
+        """
+        title = f"Nhóm #{conv_id}"
+        avatar_b64 = None
+
+        for conv in self.conversations or []:
+            if conv.get("is_group") and conv.get("conversation_id") == conv_id:
+                if conv.get("title"):
+                    title = conv["title"]
+                avatar_b64 = conv.get("avatar_b64")
+                break
+
+        self.lbl_partner_name.setText(title)
+        self.lbl_partner_username.setText(f"ID nhóm: {conv_id}")
+
+        pix = None
+        if avatar_b64:
+            try:
+                raw = base64.b64decode(avatar_b64)
+                p = QPixmap()
+                if p.loadFromData(raw) and not p.isNull():
+                    pix = self._make_round_avatar(p, 80)
+            except Exception:
+                pix = None
+
+        if pix is None:
+            pix = self.default_avatar_large or self.avatar_large
+
+        if pix and not pix.isNull():
+            self.lbl_partner_avatar.setPixmap(pix)
+
+        # --- Ẩn/hiện nút ---
+        if hasattr(self, "btn_leave_group"):
+            if self.current_group_is_owner:
+                # Chủ nhóm: không được rời nhóm, chỉ có xóa nhóm
+                self.btn_leave_group.setVisible(False)
+                if hasattr(self, "btn_delete_conversation"):
+                    self.btn_delete_conversation.setVisible(True)
+                    self.btn_delete_conversation.setText("Xóa nhóm")
+            else:
+                # Thành viên thường: chỉ rời nhóm, không xóa nhóm
+                self.btn_leave_group.setVisible(True)
+                if hasattr(self, "btn_delete_conversation"):
+                    self.btn_delete_conversation.setVisible(False)
+
+
+    def on_sidebar_conversation_selected(self, key: str):
+        key = (key or "").strip()
+        if not key:
+            return
+
+        if key.startswith("user:"):
+            username = key.split(":", 1)[1]
+            self.current_partner_username = username
+            self.current_group_id = None
+
+            self.le_to_user.setText(username)
+            if hasattr(self.sidebar, "set_active_username"):
+                self.sidebar.set_active_username(username)
+
+            self._update_info_panel(username)
+            self.on_load_history_clicked()
+
+        elif key.startswith("group:"):
+            conv_id = int(key.split(":", 1)[1])
+            self.current_partner_username = None
+
+            # Set current_group_id ngay khi user chọn group; giữ giá trị này
+            # tới khi server trả group_history_result (trong đó có is_owner)
+            self.current_group_id = conv_id
+
+            self.le_to_user.setText(f"[Group] {conv_id}")
+            self._update_group_info_panel(conv_id)
+
+            # Gửi request lịch sử — khi server trả group_history_result sẽ cập nhật
+            # current_group_is_owner từ trường "is_owner" trả về.
+            self.request_group_history(conv_id)
+
+            # Không reset current_group_id ở đây nữa
 
     def on_sidebar_search_changed(self, text: str):
         """
@@ -661,6 +885,22 @@ class ChatWindow(QMainWindow):
             self.sock.sendall(pkt)
         except OSError:
             pass
+    def request_group_history(self, conv_id: int):
+        """
+        Hỏi server lịch sử tin nhắn của 1 group theo conversation_id.
+        """
+        if not (self.sock and self.current_username):
+            return
+
+        pkt = make_packet("load_group_history", {
+            "conversation_id": conv_id,
+            "username": self.current_username,
+        })
+        try:
+            self.sock.sendall(pkt)
+            self.lbl_chat_status.setText(f"⏳ Đang tải lịch sử nhóm #{conv_id}...")
+        except OSError as e:
+            self.lbl_chat_status.setText(f"❌ Lỗi yêu cầu lịch sử nhóm: {e}")
 
     # ---------- SERVER -> CLIENT ----------
 
@@ -686,6 +926,196 @@ class ChatWindow(QMainWindow):
                 self.current_username,   
                 str(img_path)
             )
+        elif action == "update_group_avatar_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                avatar_b64 = data.get("avatar_b64")
+
+                # cập nhật vào list conversations
+                for it in self.conversations or []:
+                    if it.get("is_group") and it.get("conversation_id") == conv_id:
+                        it["avatar_b64"] = avatar_b64
+                        break
+
+                self._update_group_info_panel(conv_id)
+                self.request_conversations()
+                self.lbl_chat_status.setText("✅ Đã cập nhật avatar nhóm")
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Đổi avatar nhóm thất bại: " + str(data.get("error"))
+                )
+
+        elif action == "group_avatar_changed":
+            conv_id = data.get("conversation_id")
+            avatar_b64 = data.get("avatar_b64")
+
+            for conv in self.conversations:
+                if conv.get("conversation_id") == conv_id:
+                    conv["avatar_b64"] = avatar_b64
+
+            if self.current_group_id == conv_id:
+                self._update_group_info_panel(conv_id)
+
+            self.request_conversations()
+            self.lbl_chat_status.setText("📸 Ảnh nhóm đã được cập nhật")
+
+        elif action == "add_group_member_result":
+            if data.get("ok"):
+                uname = data.get("username")
+                self.lbl_chat_status.setText(f"✅ Đã thêm {uname} vào nhóm.")
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Thêm thành viên thất bại: " + str(data.get("error"))
+                )
+
+        elif action == "leave_group_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                if self.current_group_id == conv_id:
+                    self.current_group_id = None
+                    self.chat_list.clear()
+                    self.le_to_user.clear()
+                    self.current_group_id = None
+                    self.current_group_is_owner = False
+                    self._update_group_buttons_state()
+
+                    self._update_info_panel(None)
+                self.lbl_chat_status.setText("✅ Đã rời nhóm.")
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Không rời được nhóm: " + str(data.get("error"))
+                )
+
+        elif action == "join_group_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                gname = data.get("group_name") or f"#{conv_id}"
+                self.lbl_chat_status.setText(f"✅ Đã tham gia nhóm '{gname}'.")
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Tham gia nhóm thất bại: " + str(data.get("error"))
+                )
+        elif action in ("group_created", "create_group_result"):
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                gname = data.get("group_name") or f"Nhóm #{conv_id}"
+                self.lbl_chat_status.setText(f"✅ Nhóm '{gname}' đã được tạo/cập nhật.")
+                # reload lại sidebar để nhóm hiện ngay
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Tạo nhóm thất bại: " + str(data.get("error"))
+                )
+
+        elif action == "incoming_group_text":
+            conv_id = int(data.get("conversation_id") or 0)
+            from_user = data.get("from")
+            content = data.get("content")
+            msg_id = data.get("message_id")
+
+            if self.current_group_id == conv_id:
+                avatar_pix = None
+                if from_user != self.current_username:
+                    avatar_pix = self._get_user_avatar_pixmap(from_user, 28)
+
+                self.chat_list.add_bubble(
+                    msg_id,
+                    from_user,
+                    self.current_username,
+                    content,
+                    True,
+                    avatar_pix,
+                )
+
+            # cập nhật sidebar
+            self.request_conversations()
+
+
+        elif action == "send_group_text_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                content = data.get("content")
+                mid = data.get("message_id")
+                if self.current_group_id == conv_id:
+                    self.chat_list.add_bubble(
+                        mid,
+                        self.current_username,
+                        self.current_username,
+                        content,
+                        True,
+                        None,   # tin của mình, không cần avatar bên trái
+                    )
+
+                self.request_conversations()
+
+            else:
+                self.lbl_chat_status.setText(
+                    "❌ Gửi tin nhắn nhóm thất bại: " + str(data.get("error"))
+                )
+        elif action == "group_history_result":
+            if not data.get("ok"):
+                self.lbl_chat_status.setText(
+                    "❌ Lỗi tải lịch sử nhóm: " + str(data.get("error"))
+                )
+                return
+
+            conv_id = int(data.get("conversation_id") or 0)
+            msgs = data.get("messages", [])
+
+            self.current_group_id = conv_id
+            self.current_partner_username = None
+            self.current_group_is_owner = bool(data.get("is_owner", False))
+            self.chat_list.clear()
+
+            base_dir = Path(__file__).resolve().parents[1]
+            images_dir = base_dir / "server" / "storage" / "images"
+            videos_dir = base_dir / "server" / "storage" / "videos"
+            files_dir  = base_dir / "server" / "storage" / "files"
+
+            for m in msgs:
+                mid = m.get("id")
+                sender = m.get("sender_username")
+                msg_type = (m.get("msg_type") or "text").lower()
+                content = m.get("content") or ""
+
+                avatar_pix = None
+                if sender != self.current_username:
+                    avatar_pix = self._get_user_avatar_pixmap(sender, 28)
+
+                if msg_type == "image":
+                    img_path = images_dir / content
+                    self.chat_list.add_image_bubble(
+                        mid, sender, self.current_username, str(img_path),
+                        True, avatar_pix,
+                    )
+                elif msg_type == "video":
+                    vpath = videos_dir / content
+                    self.chat_list.add_video_bubble(
+                        mid, sender, self.current_username, str(vpath),
+                        True, avatar_pix,
+                    )
+                elif msg_type == "file":
+                    fpath = files_dir / content
+                    self.chat_list.add_file_bubble(
+                        mid, sender, self.current_username, str(fpath),
+                        True, avatar_pix,
+                    )
+                else:
+                    self.chat_list.add_bubble(
+                        mid, sender, self.current_username, content,
+                        True, avatar_pix,
+                    )
+
+            # cập nhật info panel + nút
+            self._update_group_info_panel(conv_id)
+            self._update_group_buttons_state()
+            self.lbl_chat_status.setText(f"✅ Đã tải {len(msgs)} tin nhắn trong nhóm #{conv_id}")
+
+
+
         elif action == "incoming_file":
             sender = data.get("from")
             filename = data.get("filename")
@@ -871,12 +1301,15 @@ class ChatWindow(QMainWindow):
 
                 self._update_info_panel(None)
                 self.request_conversations()
-            else:
-                self.lbl_auth_status.setText(f"❌ Đăng nhập thất bại: {data.get('error')}")
 
-        elif action == "logout_result":
-            # hiện tại logout_result chỉ confirm, mọi xử lý đã làm ở client
-            pass
+                # 👇 hiện nút tạo nhóm sau khi login
+                if hasattr(self, "btn_create_group"):
+                    self.btn_create_group.setVisible(True)
+            else:
+                self.lbl_auth_status.setText(
+                    f"❌ Đăng nhập thất bại: {data.get('error')}"
+                )
+
 
         elif action == "incoming_text":
             from_user = data.get("from")
@@ -994,17 +1427,25 @@ class ChatWindow(QMainWindow):
                 return
 
             self.conversations = data.get("items", []) or []
+            self._user_avatar_cache.clear()
             if hasattr(self.sidebar, "set_conversations"):
                 self.sidebar.set_conversations(self.conversations)
-            # Nếu đang mở 1 partner thì update lại avatar của họ
-            self._update_info_panel(self.current_partner_username)
+
+            # Đang mở group -> update info panel nhóm
+            if self.current_group_id:
+                self._update_group_info_panel(self.current_group_id)
+            else:
+                # Đang chat 1-1 -> info panel user như cũ
+                self._update_info_panel(self.current_partner_username)
 
         elif action == "search_users_result":
-            if not data.get("ok"):
-                return
-            items = data.get("items", []) or []
-            if hasattr(self.sidebar, "set_search_results"):
-                self.sidebar.set_search_results(items)
+            if data.get("ok"):
+                items = data.get("items", []) or []
+                if hasattr(self.sidebar, "set_search_results"):
+                    self.sidebar.set_search_results(items)
+            # nếu fail thì bỏ qua, không cần báo lỗi
+
+
 
         elif action == "delete_conversation_result":
             if data.get("ok"):
@@ -1052,13 +1493,53 @@ class ChatWindow(QMainWindow):
             if self.current_partner_username == uname:
                 self._update_info_panel(uname)
 
+        elif action == "delete_group_result":
+            if data.get("ok"):
+                conv_id = int(data.get("conversation_id") or 0)
+                # Nếu đang mở đúng group -> clear UI
+                if self.current_group_id == conv_id:
+                    self.current_group_id = None
+                    self.chat_list.clear()
+                    self.le_to_user.clear()
+                    self.current_group_is_owner = False
+                    self._update_group_buttons_state()
+                    self._update_info_panel(None)
+                self.lbl_chat_status.setText("✅ Đã xóa nhóm.")
+                self.request_conversations()
+            else:
+                self.lbl_chat_status.setText("❌ Xóa nhóm thất bại: " + str(data.get("error")))
+
+        elif action == "group_deleted":
+            # Thông báo này do server broadcast tới thành viên để họ cập nhật sidebar/UI
+            conv_id = int(data.get("conversation_id") or 0)
+            # Nếu đang mở đúng group -> clear
+            if self.current_group_id == conv_id:
+                self.current_group_id = None
+                self.chat_list.clear()
+                self.le_to_user.clear()
+                self.current_group_is_owner = False
+                self._update_group_buttons_state()
+                self._update_info_panel(None)
+            # Yêu cầu load lại danh sách conversation để sidebar cập nhật
+            self.request_conversations()
+            self.lbl_chat_status.setText("⚠️ Một nhóm đã bị xóa, sidebar đã được cập nhật.")
+
     # ---------- UTILS ----------
 
     def _update_info_panel(self, partner_username: str | None):
         """
         Cập nhật panel bên phải: avatar, tên, @username của người đang chat.
+        Dùng cho chat 1-1, không phải group.
         """
-        # Khi chưa chọn đoạn chat -> text default + avatar default lớn
+        self.current_group_is_owner = False  # reset về false khi không ở group
+
+        # Nút cho 1-1: có "Xóa đoạn chat", không có "Rời nhóm"
+        if hasattr(self, "btn_leave_group"):
+            self.btn_leave_group.setVisible(False)
+        if hasattr(self, "btn_delete_conversation"):
+            self.btn_delete_conversation.setVisible(True)
+            self.btn_delete_conversation.setText("Xóa đoạn chat")
+
         if not partner_username:
             self.lbl_partner_name.setText("Chưa chọn đoạn chat")
             self.lbl_partner_username.setText("")
@@ -1066,6 +1547,7 @@ class ChatWindow(QMainWindow):
             if avatar and not avatar.isNull():
                 self.lbl_partner_avatar.setPixmap(avatar)
             return
+
 
         display = partner_username
         avatar_b64: str | None = None
@@ -1240,3 +1722,237 @@ class ChatWindow(QMainWindow):
         if not (url.startswith("http://") or url.startswith("https://")):
             url = "http://" + url
         QDesktopServices.openUrl(QUrl(url))
+    def on_create_group_clicked(self):
+            """
+            Bấm nút 'Tạo nhóm' -> hỏi tên nhóm -> gửi request lên server.
+            (Hiện tại mới làm popup + gửi gói tin, phần server sẽ xử lý tạo nhóm
+            và trả về conversations_result để nhóm xuất hiện ở sidebar.)
+            """
+            if not self.current_username:
+                QMessageBox.warning(self, "Thông báo", "Đăng nhập rồi mới tạo nhóm.")
+                return
+
+            name, ok = QInputDialog.getText(
+                self,
+                "Tạo nhóm",
+                "Nhập tên nhóm:"
+            )
+            if not ok or not name.strip():
+                return
+
+            group_name = name.strip()
+
+            if not self.sock:
+                QMessageBox.warning(self, "Lỗi", "Mất kết nối server.")
+                return
+
+            pkt = make_packet("create_group", {
+                "owner": self.current_username,
+                "name": group_name,
+            })
+            try:
+                self.sock.sendall(pkt)
+                self.lbl_chat_status.setText(f"⏳ Đang tạo nhóm '{group_name}'...")
+            except OSError as e:
+                self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu tạo nhóm: {e}")
+    def on_add_user_to_group(self, username: str):
+        """
+        Chuột phải user trong sidebar -> 'Thêm vào nhóm hiện tại'.
+        """
+        if not self.current_username:
+            QMessageBox.warning(self, "Thông báo", "Đăng nhập trước.")
+            return
+        if not self.current_group_id:
+            QMessageBox.information(
+                self,
+                "Thông báo",
+                "Hãy mở một nhóm trước, rồi mới thêm thành viên."
+            )
+            return
+        if not self.sock:
+            QMessageBox.warning(self, "Lỗi", "Mất kết nối server.")
+            return
+
+        pkt = make_packet("add_group_member", {
+            "by": self.current_username,
+            "conversation_id": self.current_group_id,
+            "username": username,
+        })
+        try:
+            self.sock.sendall(pkt)
+            self.lbl_chat_status.setText(f"⏳ Đang thêm {username} vào nhóm...")
+        except OSError as e:
+            self.lbl_chat_status.setText(f"❌ Lỗi thêm thành viên: {e}")
+
+    def on_join_group_requested(self, name: str):
+        """
+        Khi gõ tên vào ô search sidebar và Enter mà không có user result:
+        coi đó là tên nhóm cần tham gia.
+        """
+        name = (name or "").strip()
+        if not name:
+            return
+        if not (self.sock and self.current_username):
+            return
+
+        pkt = make_packet("join_group_by_name", {
+            "username": self.current_username,
+            "name": name,
+        })
+        try:
+            self.sock.sendall(pkt)
+            self.lbl_chat_status.setText(f"⏳ Đang tham gia nhóm '{name}'...")
+        except OSError as e:
+            self.lbl_chat_status.setText(f"❌ Lỗi tham gia nhóm: {e}")
+    def on_leave_group_clicked(self):
+        """
+        Nút 'Rời nhóm' trong info panel.
+        """
+        if not self.current_username:
+            QMessageBox.warning(self, "Thông báo", "Đăng nhập trước.")
+            return
+        if not self.current_group_id:
+            QMessageBox.information(
+                self,
+                "Thông báo",
+                "Chỉ rời được khi đang mở một nhóm, không phải chat 1-1."
+            )
+            return
+        if not self.sock:
+            QMessageBox.warning(self, "Lỗi", "Mất kết nối server.")
+            return
+
+        ans = QMessageBox.question(
+            self,
+            "Rời nhóm",
+            "Bạn có chắc muốn rời nhóm hiện tại?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        pkt = make_packet("leave_group", {
+            "by": self.current_username,
+            "conversation_id": self.current_group_id,
+        })
+        try:
+            self.sock.sendall(pkt)
+            self.lbl_chat_status.setText("⏳ Đang rời nhóm...")
+        except OSError as e:
+            self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu rời nhóm: {e}")
+    def _on_group_avatar_clicked(self, event):
+        """
+        Bấm avatar bên info -> đổi avatar nhóm.
+        """
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # chỉ đổi khi đang mở group
+        if not self.current_group_id:
+            return
+
+        # chọn ảnh
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn ảnh nhóm",
+            "",
+            "Ảnh (*.png *.jpg *.jpeg *.gif)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except Exception:
+            QMessageBox.warning(self, "Lỗi", "Không đọc được file ảnh.")
+            return
+
+        pix = QPixmap()
+        if not (pix.loadFromData(raw) and not pix.isNull()):
+            QMessageBox.warning(self, "Lỗi", "File không phải ảnh hợp lệ.")
+            return
+
+        img_b64 = base64.b64encode(raw).decode("ascii")
+
+        # preview tạm trên client
+        avatar_pix = self._make_round_avatar(pix, 80)
+        self.lbl_partner_avatar.setPixmap(avatar_pix)
+
+        # gửi server
+        if not self.sock:
+            QMessageBox.warning(self, "Lỗi", "Mất kết nối server.")
+            return
+
+        pkt = make_packet("update_group_avatar", {
+            "conversation_id": self.current_group_id,
+            "username": self.current_username,
+            "image_b64": img_b64,
+        })
+        try:
+            self.sock.sendall(pkt)
+            self.lbl_chat_status.setText("⏳ Đang cập nhật avatar nhóm...")
+        except Exception as e:
+            self.lbl_chat_status.setText(f"❌ Lỗi gửi avatar nhóm: {e}")
+
+
+    def _get_user_avatar_pixmap(self, username: str, size: int = 28) -> QPixmap | None:
+        """
+        Lấy avatar tròn của 1 user (dùng cho avatar nhỏ trong group),
+        dựa vào danh sách self.conversations ở sidebar.
+        """
+        if not username:
+            return None
+
+        key = (username, size)
+        if key in self._user_avatar_cache:
+            return self._user_avatar_cache[key]
+
+        avatar_b64 = None
+        for conv in self.conversations or []:
+            if conv.get("partner_username") == username:
+                avatar_b64 = conv.get("avatar_b64") or conv.get("partner_avatar_url")
+                break
+
+        if not avatar_b64:
+            return None
+
+        try:
+            raw = base64.b64decode(avatar_b64)
+            pix = QPixmap()
+            if not (pix.loadFromData(raw) and not pix.isNull()):
+                return None
+            pix = self._make_round_avatar(pix, size)
+        except Exception:
+            return None
+
+        self._user_avatar_cache[key] = pix
+        return pix
+    def _update_group_buttons_state(self):
+        """
+        Ẩn/hiện nút 'Rời nhóm' và 'Xóa nhóm' tùy theo quyền.
+        """
+        if not hasattr(self, "btn_leave_group"):
+            return
+
+        # Không đang ở group
+        if not self.current_group_id:
+            self.btn_leave_group.setVisible(False)
+            if hasattr(self, "btn_delete_conversation"):
+                self.btn_delete_conversation.setVisible(True)
+                self.btn_delete_conversation.setText("Xóa đoạn chat")
+            return
+
+        # Đang ở group
+        if self.current_group_is_owner:
+            # Chủ nhóm: chỉ có nút Xóa nhóm
+            self.btn_leave_group.setVisible(False)
+            if hasattr(self, "btn_delete_conversation"):
+                self.btn_delete_conversation.setVisible(True)
+                self.btn_delete_conversation.setText("Xóa nhóm")
+        else:
+            # Member: chỉ có nút Rời nhóm
+            self.btn_leave_group.setVisible(True)
+            if hasattr(self, "btn_delete_conversation"):
+                self.btn_delete_conversation.setVisible(False)

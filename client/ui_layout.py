@@ -368,6 +368,8 @@ def _build_chat_page(win: QWidget):
     win.btn_links = QPushButton("Link")
     win.btn_delete_conversation = QPushButton("Xóa đoạn chat")
     win.btn_delete_conversation.setObjectName("danger_button")
+    win.btn_leave_group = QPushButton("Rời nhóm")
+    win.btn_leave_group.setObjectName("secondary_button")
 
     info_layout.addWidget(win.btn_media)
     info_layout.addWidget(win.btn_files)
@@ -383,7 +385,18 @@ def _build_chat_page(win: QWidget):
 
     info_layout.addStretch()
     info_layout.addWidget(win.btn_delete_conversation)
+    info_layout.addWidget(win.btn_media)
+    info_layout.addWidget(win.btn_files)
+    info_layout.addWidget(win.btn_links)
 
+    win.list_attachments = QListWidget()
+    ...
+
+    info_layout.addWidget(win.list_attachments)
+
+    info_layout.addStretch()
+    info_layout.addWidget(win.btn_leave_group)       # 👈 thêm dòng này
+    info_layout.addWidget(win.btn_delete_conversation)
 
     chat_outer.addWidget(win.info_panel, 1)
 
@@ -434,6 +447,11 @@ def setup_chatwindow_ui(win: QWidget):
     if win.avatar_small and not win.avatar_small.isNull():
         win.lbl_profile_avatar.setPixmap(win.avatar_small)
 
+    # 👉 THÊM NÚT TẠO NHÓM Ở ĐÂY
+    win.btn_create_group = QPushButton("Tạo nhóm")
+    win.btn_create_group.setObjectName("secondary_button")
+    win.btn_create_group.setFixedHeight(32)
+
     win.btn_logout = QPushButton("⎋")
     win.btn_logout.setObjectName("icon_button")
     win.btn_logout.setToolTip("Đăng xuất")
@@ -443,9 +461,11 @@ def setup_chatwindow_ui(win: QWidget):
     header.addSpacing(8)
     header.addWidget(win.lbl_profile_avatar)
     header.addSpacing(4)
+    header.addWidget(win.btn_create_group)  # 👈 nhớ add vào
     header.addWidget(win.btn_logout)
 
     card_layout.addLayout(header)
+
 
     win.lbl_auth_status = QLabel("")
     win.lbl_auth_status.setObjectName("status_label")
