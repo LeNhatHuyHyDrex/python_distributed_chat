@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
 )
 
 
-
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
@@ -808,6 +807,10 @@ class ChatWindow(QMainWindow):
                 self.auth_stack.setCurrentIndex(0)
             else:
                 self.lbl_auth_status.setText(f"❌ Đăng ký thất bại: {data.get('error')}")
+        elif action == "admin_banned_now":
+            reason = data.get("reason") or "Tài khoản của bạn đã bị ban bởi quản trị viên."
+            self.show_banned_dialog(reason)
+
         elif action == "incoming_image":
             from_user = data.get("from")
             filename = data.get("filename")
@@ -1182,31 +1185,41 @@ class ChatWindow(QMainWindow):
             self.lbl_chat_status.setText(f"✅ Đã tải {len(msgs)} tin nhắn trong nhóm #{conv_id}")
 
         elif action == "login_result":
-            if data.get("ok"):
-                self.current_username = self.le_login_username.text().strip()
-                self.current_display_name = data.get("display_name")
-                self.lbl_auth_status.setText("✅ Đăng nhập thành công")
-                self.lbl_user_info.setText(
-                    f"{self.current_display_name} ({self.current_username})"
-                )
-                self.main_stack.setCurrentWidget(self.chat_panel)
-                self.lbl_chat_status.setText("")
-                self.current_partner_username = None
-
-                # Avatar của chính mình (base64 trong DB)
-                avatar_b64 = data.get("avatar_b64")
-                self._set_current_user_avatar_from_b64(avatar_b64)
-
-                self._update_info_panel(None)
-                self.request_conversations()
-
-                # 👇 hiện nút tạo nhóm sau khi login
-                if hasattr(self, "btn_create_group"):
-                    self.btn_create_group.setVisible(True)
-            else:
+            # Nếu đăng nhập thất bại (sai tk/mk, lỗi khác...)
+            if not data.get("ok"):
                 self.lbl_auth_status.setText(
                     f"❌ Đăng nhập thất bại: {data.get('error')}"
                 )
+                return
+
+            # --- Đăng nhập thành công ---
+            banned = bool(data.get("banned"))  # <- cờ bị ban server gửi về
+
+            self.current_username = self.le_login_username.text().strip()
+            self.current_display_name = data.get("display_name")
+            self.lbl_auth_status.setText("✅ Đăng nhập thành công")
+            self.lbl_user_info.setText(
+                f"{self.current_display_name} ({self.current_username})"
+            )
+            self.main_stack.setCurrentWidget(self.chat_panel)
+            self.lbl_chat_status.setText("")
+            self.current_partner_username = None
+
+            # Avatar của chính mình (base64 trong DB)
+            avatar_b64 = data.get("avatar_b64")
+            self._set_current_user_avatar_from_b64(avatar_b64)
+
+            self._update_info_panel(None)
+            self.request_conversations()
+
+            # 👇 hiện nút tạo nhóm sau khi login
+            if hasattr(self, "btn_create_group"):
+                self.btn_create_group.setVisible(True)
+
+            # Nếu tài khoản đang bị BAN -> bật pop up khóa UI
+            if banned:
+                msg = data.get("error") or "Tài khoản của bạn đã bị ban bởi quản trị viên."
+                self.show_banned_dialog(msg)
 
 
         elif action == "incoming_text":
@@ -1225,6 +1238,17 @@ class ChatWindow(QMainWindow):
         elif action == "server_broadcast":
             msg_text = data.get("message")
             self.lbl_chat_status.setText(f"[SERVER]: {msg_text}")
+        elif action == "admin_force_logout":
+            reason = data.get("reason") or "Bạn đã bị quản trị viên đăng xuất."
+            QMessageBox.warning(self, "Đăng xuất bởi admin", reason)
+            # dùng lại logic logout có sẵn
+            try:
+                self.on_logout_clicked()
+            except Exception:
+                # fallback nếu có gì lỗi
+                self.current_username = None
+                if hasattr(self, "lbl_chat_status"):
+                    self.lbl_chat_status.setText("⛔ Bạn đã bị đăng xuất bởi quản trị viên.")
 
         elif action == "send_text_result":
             if data.get("ok"):
@@ -2362,3 +2386,40 @@ class ChatWindow(QMainWindow):
         else:
             if getattr(self, "lbl_chat_status", None):
                 self.lbl_chat_status.setText("❌ Không mở được link")
+    def show_banned_dialog(self, message: str):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Tài khoản bị ban")
+        dlg.setModal(True)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+        # 👇 Tăng kích thước popup
+        dlg.resize(420, 220)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
+
+        lbl = QLabel(message)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("font-size: 14px;")
+        layout.addWidget(lbl)
+
+        btn_logout = QPushButton("Đăng xuất")
+        btn_logout.setFixedHeight(38)
+        btn_logout.setStyleSheet(
+            "font-size: 14px; font-weight: bold; padding: 6px 16px;"
+        )
+        layout.addWidget(btn_logout)
+
+        def do_logout():
+            try:
+                self.on_logout_clicked()
+            except Exception:
+                pass
+            dlg.accept()
+
+        btn_logout.clicked.connect(do_logout)
+
+        dlg.exec()

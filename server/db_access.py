@@ -720,4 +720,44 @@ def get_conversation_owner(conversation_id: int):
     finally:
         conn.close()
 
+def set_user_ban_status(username: str, banned: bool):
+    """
+    Cập nhật cờ is_banned cho user trong DB.
+    Nếu có nhiều node DB thì update hết các node trong DB_NODES.
+    """
+    value = 1 if banned else 0
 
+    for node in DB_NODES:
+        conn = get_connection(node)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET is_banned = %s WHERE username = %s",
+                    (value, username),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def is_user_banned(username: str) -> bool:
+    """
+    Lấy trạng thái is_banned của user từ DB (node đầu tiên).
+    """
+    if not username:
+        return False
+
+    node = DB_NODES[0]
+    conn = get_connection(node)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_banned FROM users WHERE username = %s",
+                (username,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            return bool(row.get("is_banned", 0))
+    finally:
+        conn.close()

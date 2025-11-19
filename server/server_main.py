@@ -5,7 +5,8 @@ import json
 import hashlib
 import os
 import base64
-from pathlib import Path  
+from pathlib import Path 
+from datetime import datetime
 from common.config import SERVER_HOST, SERVER_PORT, select_node_for_conversation
 from server.db_access import (
     create_user,
@@ -30,7 +31,10 @@ from server.db_access import (
     # thêm hai hàm dưới đây để xóa nhóm & lấy thành viên trước khi thông báo
     delete_group,
     get_conversation_owner,
+    set_user_ban_status,
+    is_user_banned,
 )
+
 
 
 
@@ -48,8 +52,10 @@ for d in (IMAGES_DIR, VIDEOS_DIR, FILES_DIR):
 
 # mapping: username -> socket
 clients: dict[str, socket.socket] = {}
+ONLINE_USERS: dict[str, dict] = {}
 
 MAX_AVATAR_BYTES = 2 * 1024 * 1024  # 2MB sau khi decode
+
 
 
 def hash_password(raw: str) -> str:
@@ -124,7 +130,18 @@ def handle_client(conn: socket.socket, addr):
                     continue
 
                 username = user["username"]
+
+                # 🔹 LẤY TRẠNG THÁI BAN TỪ DB
+                banned = is_user_banned(username)
+
                 clients[username] = conn
+                ONLINE_USERS[username] = {
+                    "conn": conn,
+                    "addr": addr,
+                    "login_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "user_id": user["id"],
+                    "display_name": user["display_name"],
+                }
 
                 avatar_b64 = user.get("avatar_url")
 
@@ -133,17 +150,179 @@ def handle_client(conn: socket.socket, addr):
                     "user_id": user["id"],
                     "display_name": user["display_name"],
                     "avatar_b64": avatar_b64,
+                    "banned": banned,  # gửi cờ banned cho client
                 })
-                print(f"[+] {username} logged in")
+                print(f"[+] {username} logged in (banned={banned})")
+
+
+
+
+            elif action == "admin_ban":
+                target_username = data.get("username")
+                if not target_username:
+                    send_to_conn(conn, "admin_ban_result", {
+                        "ok": False,
+                        "error": "No username"
+                    })
+                    continue
+
+                # 🔹 GHI VÀO DB
+                set_user_ban_status(target_username, True)
+
+                # nếu đang online thì gửi thông báo cho client đã bị ban
+                info = ONLINE_USERS.get(target_username)
+                target_conn = info["conn"] if info else clients.get(target_username)
+                if target_conn:
+                    try:
+                        send_to_conn(target_conn, "admin_banned_now", {
+                            "reason": "Tài khoản của bạn đã bị ban bởi quản trị viên."
+                        })
+                    except Exception:
+                        pass
+
+                send_to_conn(conn, "admin_ban_result", {
+                    "ok": True,
+                    "username": target_username,
+                })
+                print(f"[ADMIN] BANNED {target_username} (saved in DB)")
+
+            elif action == "admin_unban":
+                target_username = data.get("username")
+                if not target_username:
+                    send_to_conn(conn, "admin_unban_result", {
+                        "ok": False,
+                        "error": "No username"
+                    })
+                    continue
+
+                # 🔹 GHI VÀO DB
+                set_user_ban_status(target_username, False)
+
+                send_to_conn(conn, "admin_unban_result", {
+                    "ok": True,
+                    "username": target_username,
+                })
+                print(f"[ADMIN] UNBANNED {target_username}")
+
 
             elif action == "logout":
                 by_username = data.get("username")
                 if by_username in clients and clients[by_username] is conn:
                     del clients[by_username]
+                if by_username in ONLINE_USERS and ONLINE_USERS[by_username]["conn"] is conn:
+                    del ONLINE_USERS[by_username]
                 if username == by_username:
                     username = None
                 send_to_conn(conn, "logout_result", {"ok": True})
                 print(f"[+] {by_username} logged out")
+            # ========== ADMIN ACTIONS (GUI SERVER) ==========
+
+            elif action == "admin_get_online_users":
+                users_data = []
+                for uname, info in list(ONLINE_USERS.items()):
+                    addr_info = info.get("addr")
+                    if isinstance(addr_info, tuple):
+                        ip = f"{addr_info[0]}:{addr_info[1]}"
+                    else:
+                        ip = str(addr_info)
+
+                    users_data.append({
+                        "username": uname,
+                        "display_name": info.get("display_name"),
+                        "login_time": info.get("login_time"),
+                        "ip": ip,
+                        "status": "online",
+                        "banned": is_user_banned(uname),  # 🔹 lấy từ DB
+                    })
+
+                send_to_conn(conn, "admin_online_users", {"users": users_data})
+
+
+
+
+
+            elif action == "admin_kick":
+                target_username = data.get("username")
+                target_conn = None
+                info = ONLINE_USERS.get(target_username)
+                if info:
+                    target_conn = info.get("conn")
+                elif target_username in clients:
+                    target_conn = clients[target_username]
+
+                if target_conn:
+                    # báo cho client biết bị kick
+                    try:
+                        send_to_conn(target_conn, "admin_force_logout", {
+                            "reason": "Bạn đã bị quản trị viên đăng xuất."
+                        })
+                    except Exception:
+                        pass
+
+                    try:
+                        target_conn.close()
+                    except OSError:
+                        pass
+
+                    if target_username in clients:
+                        del clients[target_username]
+                    if target_username in ONLINE_USERS:
+                        del ONLINE_USERS[target_username]
+
+                    send_to_conn(conn, "admin_kick_result", {
+                        "ok": True,
+                        "username": target_username,
+                    })
+                    print(f"[ADMIN] Kicked user {target_username}")
+                else:
+                    send_to_conn(conn, "admin_kick_result", {
+                        "ok": False,
+                        "username": target_username,
+                        "error": "User not online",
+                    })
+
+            elif action == "admin_broadcast_all":
+                msg_text = data.get("message", "")
+                # dùng lại event 'server_broadcast' mà client đã xử lý
+                for uname, info in list(ONLINE_USERS.items()):
+                    c = info.get("conn")
+                    try:
+                        send_to_conn(c, "server_broadcast", {
+                            "message": msg_text,
+                        })
+                    except Exception:
+                        pass
+                print(f"[ADMIN] Broadcast all: {msg_text!r}")
+
+            elif action == "admin_broadcast_user":
+                msg_text = data.get("message", "")
+                target_username = data.get("username")
+                info = ONLINE_USERS.get(target_username)
+                if info:
+                    c = info.get("conn")
+                    try:
+                        send_to_conn(c, "server_broadcast", {
+                            "message": msg_text,
+                        })
+                    except Exception:
+                        pass
+                    print(f"[ADMIN] Broadcast to {target_username}: {msg_text!r}")
+
+            elif action == "admin_broadcast_multi":
+                msg_text = data.get("message", "")
+                usernames = data.get("usernames") or []
+                for uname in usernames:
+                    info = ONLINE_USERS.get(uname)
+                    if not info:
+                        continue
+                    c = info.get("conn")
+                    try:
+                        send_to_conn(c, "server_broadcast", {
+                            "message": msg_text,
+                        })
+                    except Exception:
+                        pass
+                print(f"[ADMIN] Broadcast to {usernames}: {msg_text!r}")
 
             # ========== CHAT TEXT & HISTORY ==========
 
@@ -1024,6 +1203,8 @@ def handle_client(conn: socket.socket, addr):
     finally:
         if username and username in clients and clients[username] is conn:
             del clients[username]
+        if username and username in ONLINE_USERS and ONLINE_USERS[username]["conn"] is conn:
+            del ONLINE_USERS[username]
         try:
             conn.close()
         except OSError:
