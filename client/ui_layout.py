@@ -366,7 +366,8 @@ def _build_chat_page(win: QWidget):
     win.btn_media = QPushButton("Ảnh & Video")
     win.btn_files = QPushButton("File")
     win.btn_links = QPushButton("Link")
-    
+    # 👉 NÚT THÀNH VIÊN MỚI
+    win.btn_members = QPushButton("Thành viên")
     win.btn_delete_conversation = QPushButton("Xóa đoạn chat")
     win.btn_delete_conversation.setObjectName("danger_button")
     win.btn_leave_group = QPushButton("Rời nhóm")
@@ -375,7 +376,7 @@ def _build_chat_page(win: QWidget):
     info_layout.addWidget(win.btn_media)
     info_layout.addWidget(win.btn_files)
     info_layout.addWidget(win.btn_links)
-
+    info_layout.addWidget(win.btn_members)
     win.list_attachments = QListWidget()
     win.list_attachments.setObjectName("info_list")
     win.list_attachments.setVisible(False)

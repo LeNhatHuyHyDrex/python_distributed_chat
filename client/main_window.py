@@ -10,7 +10,7 @@ from PyQt6.QtGui import QPixmap, QPainter, QPainterPath, QDesktopServices
 from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtWidgets import (
     QMainWindow, QMessageBox, QFileDialog,
-    QDialog, QVBoxLayout, QLabel, QListWidgetItem,
+    QDialog, QVBoxLayout, QLabel, QListWidgetItem, QListWidget,
     QHBoxLayout, QPushButton, QSlider, QInputDialog
 )
 
@@ -226,6 +226,8 @@ class ChatWindow(QMainWindow):
         self.current_group_id: int | None = None
         self.current_group_is_owner: bool = False
         self.current_attachments_kind: str | None = None  # 'media' | 'files' | 'links' | None
+        self.current_group_members: list[dict] = []  # lưu tạm danh sách thành viên của group đang mở
+
         # cache avatar user: (username, size) -> QPixmap
         self._user_avatar_cache: dict[tuple[str, int], QPixmap] = {}
          # cache avatar tròn nhỏ cho từng username, dùng trong group chat
@@ -1355,6 +1357,49 @@ class ChatWindow(QMainWindow):
                 if hasattr(self.sidebar, "set_search_results"):
                     self.sidebar.set_search_results(items)
             # nếu fail thì bỏ qua, không cần báo lỗi
+        elif action == "group_members_result":
+            # Kết quả danh sách thành viên nhóm
+            if not data.get("ok"):
+                QMessageBox.warning(self, "Thành viên nhóm",
+                                    "Không lấy được danh sách: " + str(data.get("error")))
+                return
+
+            members = data.get("members") or []
+            self.current_group_members = members  # lưu lại để Bước 3 còn dùng
+
+            # Tạo dialog hiển thị danh sách
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Thành viên nhóm")
+            layout = QVBoxLayout(dlg)
+
+            label = QLabel(f"🧑‍🤝‍🧑 Số thành viên: {len(members)}")
+            layout.addWidget(label)
+
+            lst = QListWidget()
+            for m in members:
+                uname = m.get("username") or ""
+                dname = (m.get("display_name") or "").strip()
+                if dname and dname != uname:
+                    text = f"{dname} ({uname})"
+                else:
+                    text = uname
+                item = QListWidgetItem(text)
+                # lưu username trong UserRole để Bước 3 dùng
+                item.setData(Qt.ItemDataRole.UserRole, uname)
+                lst.addItem(item)
+            layout.addWidget(lst)
+            
+
+            # hiện tại Bước 2 chỉ xem danh sách, chưa xử lý double-click
+            btn_close = QPushButton("Đóng")
+            btn_close.clicked.connect(dlg.accept)
+            btn_row = QHBoxLayout()
+            btn_row.addStretch(1)
+            btn_row.addWidget(btn_close)
+            layout.addLayout(btn_row)
+
+            dlg.resize(320, 420)
+            dlg.exec()
 
         elif action == "attachments_result":
             if not data.get("ok"):
@@ -1620,7 +1665,9 @@ class ChatWindow(QMainWindow):
         if hasattr(self, "btn_delete_conversation"):
             self.btn_delete_conversation.setVisible(True)
             self.btn_delete_conversation.setText("Xóa nhóm")
-        
+                # 👉 HIỆN NÚT THÀNH VIÊN KHI ĐANG Ở GROUP
+        if hasattr(self, "btn_members"):
+            self.btn_members.setVisible(True)
         # cập nhật trạng thái nút theo cờ current_group_is_owner
         self._update_group_buttons_state()
 
@@ -1819,6 +1866,39 @@ class ChatWindow(QMainWindow):
             })
         try:
             self.sock.sendall(pkt)
+        except OSError as e:
+            self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu: {e}")
+    def on_show_members(self):
+        """
+        Bấm nút 'Thành viên' trong info panel.
+        Chỉ áp dụng cho group (current_group_id != None).
+        Gửi yêu cầu lên server để lấy danh sách member.
+        """
+        if not self.current_username:
+            self.lbl_chat_status.setText("⚠️ Chưa đăng nhập")
+            return
+
+        if not self.current_group_id:
+            # về lý thuyết nút chỉ hiện khi đang ở group, nhưng kiểm tra cho chắc
+            QMessageBox.information(self, "Thành viên", "Chức năng này chỉ dùng cho nhóm.")
+            return
+
+        if not self.sock:
+            self.lbl_chat_status.setText("⚠️ Mất kết nối server")
+            return
+
+        # chuẩn bị gói tin gửi server
+        from .network import make_packet
+        pkt = make_packet("list_group_members", {
+            "username": self.current_username,
+            "conversation_id": self.current_group_id,
+        })
+
+        try:
+            self.sock.sendall(pkt)
+            self.lbl_chat_status.setText(
+                f"⏳ Đang lấy danh sách thành viên của nhóm #{self.current_group_id}..."
+            )
         except OSError as e:
             self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu: {e}")
 

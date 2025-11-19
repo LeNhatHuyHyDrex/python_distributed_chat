@@ -422,6 +422,54 @@ def handle_client(conn: socket.socket, addr):
                     "is_owner": is_owner,
                 })
 
+            elif action == "list_group_members":
+                conv_id_raw = data.get("conversation_id")
+                username_req = (data.get("username") or "").strip()
+
+                # kiểm tra conversation_id hợp lệ
+                try:
+                    conv_id = int(conv_id_raw)
+                except (TypeError, ValueError):
+                    send_to_conn(conn, "group_members_result", {
+                        "ok": False,
+                        "error": "Invalid conversation id",
+                    })
+                    continue
+
+                user = get_user_by_username(username_req)
+                if not user:
+                    send_to_conn(conn, "group_members_result", {
+                        "ok": False,
+                        "error": "User not found",
+                    })
+                    continue
+
+                # chỉ user trong nhóm mới xem được member
+                if not is_user_in_conversation(conv_id, user["id"]):
+                    send_to_conn(conn, "group_members_result", {
+                        "ok": False,
+                        "error": "Bạn không thuộc nhóm này",
+                    })
+                    continue
+
+                try:
+                    members = get_members_of_conversation(conv_id) or []
+                except Exception:
+                    members = []
+
+                simple_members = []
+                for m in members:
+                    simple_members.append({
+                        "user_id": m.get("id") or m.get("user_id"),
+                        "username": m.get("username"),
+                        "display_name": m.get("display_name"),
+                    })
+
+                send_to_conn(conn, "group_members_result", {
+                    "ok": True,
+                    "conversation_id": conv_id,
+                    "members": simple_members,
+                })
 
             elif action == "delete_message":
                 by_username = (data.get("by") or "").strip()
