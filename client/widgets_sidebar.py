@@ -177,6 +177,7 @@ class ConversationSidebar(QWidget):
         # Nếu đang gõ search và đã có _search_results từ server -> ưu tiên show kết quả search
         if text and self._search_results:
             for u in self._search_results:
+                
                 uname = (u.get("username") or "").strip()
                 display = (u.get("display_name") or uname).strip()
                 if not uname:

@@ -727,7 +727,7 @@ class ChatWindow(QMainWindow):
             if hasattr(self, "le_to_user"):
                 self.le_to_user.setText(username)
             if hasattr(self.sidebar, "set_active_username"):
-                self.sidebar.set_active_username(username)
+                self.sidebar.set_active_username(f"user:{username}")
             self._update_info_panel(username)
             # request history 1-1
             pkt = make_packet("load_history", {"from": self.current_username, "to": username})
@@ -1250,7 +1250,7 @@ class ChatWindow(QMainWindow):
             self.current_partner_username = partner
             self.le_to_user.setText(partner or "")
             if partner and hasattr(self.sidebar, "set_active_username"):
-                self.sidebar.set_active_username(partner)
+                self.sidebar.set_active_username(f"user:{partner}")
             self._update_info_panel(partner)
 
             self.chat_list.clear()
