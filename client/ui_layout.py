@@ -366,6 +366,13 @@ def _build_chat_page(win: QWidget):
     win.btn_media = QPushButton("Ảnh & Video")
     win.btn_files = QPushButton("File")
     win.btn_links = QPushButton("Link")
+
+    # 👉 Nút gọi thoại / video (sẽ gắn WebRTC sau)
+    win.btn_call_audio = QPushButton("📞 Gọi thoại")
+    win.btn_call_audio.setObjectName("secondary_button")
+    
+    win.btn_call_video = QPushButton("🎥 Video call")
+    win.btn_call_video.setObjectName("secondary_button")
     # 👉 NÚT THÀNH VIÊN MỚI
     win.btn_members = QPushButton("Thành viên")
     win.btn_delete_conversation = QPushButton("Xóa đoạn chat")
@@ -376,6 +383,8 @@ def _build_chat_page(win: QWidget):
     info_layout.addWidget(win.btn_media)
     info_layout.addWidget(win.btn_files)
     info_layout.addWidget(win.btn_links)
+    info_layout.addWidget(win.btn_call_audio)
+    info_layout.addWidget(win.btn_call_video)
     info_layout.addWidget(win.btn_members)
     win.list_attachments = QListWidget()
     win.list_attachments.setObjectName("info_list")

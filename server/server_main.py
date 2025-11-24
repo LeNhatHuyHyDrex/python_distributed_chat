@@ -71,6 +71,16 @@ def send_to_conn(conn: socket.socket, action: str, data: dict):
         print(f"[SERVER] Không gửi được tới client (socket chết): {e}")
         # Không raise, tránh làm hỏng thread server
 
+def send_to_user(username: str, action: str, data: dict) -> bool:
+    """
+    Gửi 1 gói cho user nếu đang online.
+    Trả về True nếu gửi được.
+    """
+    conn = clients.get(username)
+    if not conn:
+        return False
+    send_to_conn(conn, action, data)
+    return True
 
 def handle_client(conn: socket.socket, addr):
     print(f"[+] New connection from {addr}")
@@ -236,7 +246,6 @@ def handle_client(conn: socket.socket, addr):
                     })
 
                 send_to_conn(conn, "admin_online_users", {"users": users_data})
-
 
 
 
@@ -649,6 +658,75 @@ def handle_client(conn: socket.socket, addr):
                     "conversation_id": conv_id,
                     "members": simple_members,
                 })
+            elif action == "call_signal":
+                # Dùng cho WebRTC signaling (invite/accept/reject/offer/answer/ice/bye)
+                if not username:
+                    send_to_conn(conn, "call_error", {
+                        "error": "Not logged in",
+                    })
+                    continue
+
+                kind = data.get("kind")
+                to_user = (data.get("to") or "").strip()
+                conv_id_raw = data.get("conversation_id")
+                payload = data.get("payload") or {}
+                is_video = bool(data.get("is_video", True))
+
+                # --- PRIVATE CALL: có 'to' ---
+                if to_user:
+                    ok = send_to_user(to_user, "call_signal", {
+                        "kind": kind,
+                        "from": username,
+                        "to": to_user,
+                        "is_video": is_video,
+                        "payload": payload,
+                        "conversation_id": conv_id_raw,
+                    })
+                    if not ok and kind == "invite":
+                        # báo lại cho caller nếu user offline
+                        send_to_conn(conn, "call_error", {
+                            "error": "User offline",
+                            "to": to_user,
+                            "kind": kind,
+                        })
+                    continue
+
+                # --- GROUP CALL: dùng conversation_id ---
+                if conv_id_raw is not None:
+                    try:
+                        conv_id = int(conv_id_raw)
+                    except (TypeError, ValueError):
+                        send_to_conn(conn, "call_error", {
+                            "error": "Invalid conversation id",
+                        })
+                        continue
+
+                    # chỉ member mới được gửi signal
+                    user = get_user_by_username(username)
+                    if not user or not is_user_in_conversation(conv_id, user["id"]):
+                        send_to_conn(conn, "call_error", {
+                            "error": "Bạn không thuộc nhóm này",
+                        })
+                        continue
+
+                    try:
+                        members = get_members_of_conversation(conv_id) or []
+                    except Exception:
+                        members = []
+
+                    for m in members:
+                        uname = m.get("username")
+                        if not uname or uname == username:
+                            continue  # không gửi lại cho chính mình
+                        send_to_user(uname, "call_signal", {
+                            "kind": kind,
+                            "from": username,
+                            "is_video": is_video,
+                            "payload": payload,
+                            "conversation_id": conv_id,
+                        })
+                    continue
+
 
             elif action == "delete_message":
                 by_username = (data.get("by") or "").strip()

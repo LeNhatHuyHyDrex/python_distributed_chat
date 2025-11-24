@@ -5,6 +5,7 @@ import shutil
 import re
 from pathlib import Path
 from typing import Any
+from .call_window import CallWindow
 
 from PyQt6.QtGui import QPixmap, QPainter, QPainterPath, QDesktopServices
 from PyQt6.QtCore import Qt, QUrl, QTimer
@@ -23,6 +24,180 @@ from .network import NetworkThread, make_packet
 from .ui_layout import setup_chatwindow_ui
 
 class ChatWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.sock: socket.socket | None = None
+        self.net_thread: NetworkThread | None = None
+
+        self.current_username: str | None = None
+        self.current_display_name: str | None = None
+        self.current_partner_username: str | None = None
+        self.conversations: list[dict[str, Any]] = []
+        self.current_group_id: int | None = None
+        self.current_group_is_owner: bool = False
+        self.current_attachments_kind: str | None = None
+        self.current_group_members: list[dict] = []
+        
+        self._user_avatar_cache: dict[tuple[str, int], QPixmap] = {}
+        self._avatar_cache: dict[str, QPixmap] = {} # cache avatar tròn nhỏ
+        
+        # Biến lưu cửa sổ gọi hiện tại
+        self.current_call_window: CallWindow | None = None
+
+        setup_chatwindow_ui(self)
+        
+        if hasattr(self, "btn_create_group"):
+            self.btn_create_group.setVisible(False)
+
+        self.default_avatar_small = getattr(self, "avatar_small", None)
+        self.default_avatar_large = getattr(self, "avatar_large", None)
+        self.main_avatar_b64: str | None = None
+
+        self._connect_to_server()
+        self._connect_signals()
+        self._update_info_panel(None)
+    def handle_call_signal(self, data: dict):
+        kind = data.get("kind")
+        from_user = data.get("from")
+        is_video = bool(data.get("is_video", True))
+        conv_id = data.get("conversation_id")
+        mode = "group" if conv_id is not None else "private"
+
+        # 1. NHẬN LỜI MỜI (INVITE)
+        if kind == "invite":
+            call_type = "Video call" if is_video else "Audio call"
+            text = f"{from_user} đang mời bạn {call_type} ({mode}).\nBạn có muốn tham gia không?"
+
+            # Hỏi ý kiến
+            ret = QMessageBox.question(self, "Cuộc gọi đến", text, 
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            
+            if ret == QMessageBox.StandardButton.No:
+                # Từ chối
+                reply = {"kind": "reject", "to": from_user, "is_video": is_video}
+                if mode == "group": reply["conversation_id"] = conv_id
+                try: self.sock.sendall(make_packet("call_signal", reply))
+                except: pass
+                return
+
+            # ĐỒNG Ý -> MỞ CỬA SỔ TRƯỚC (QUAN TRỌNG)
+            # Chưa gửi accept vội, để user chọn Camera xong bấm nút "Trả lời" mới gửi
+            peers = [from_user]
+            dlg = CallWindow(
+                parent=self,
+                mode=mode,
+                is_video=is_video,
+                self_name=self.current_username or "",
+                peers=peers,
+                is_incoming=True,           # <--- Báo hiệu là người nhận
+                conv_id=conv_id,
+                partner_username=from_user
+            )
+            self.current_call_window = dlg
+            dlg.exec() # Treo ở đây chờ user thao tác xong
+                # --------- BYE: bên kia kết thúc cuộc gọi ----------
+        elif kind == "bye":
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText(f"⏹ {from_user} đã kết thúc cuộc gọi")
+            if self.current_call_window:
+                try:
+                    if hasattr(self.current_call_window, "webrtc"):
+                        self.current_call_window.webrtc.close()
+                    self.current_call_window.close()
+                except: pass
+            self.current_call_window = None
+
+        elif kind == "ice":
+            cand = (data.get("payload") or {}).get("candidate")
+            dlg = getattr(self, "current_call_window", None)
+            if cand and dlg and dlg.webrtc:
+                dlg.webrtc.add_ice(cand)
+
+
+
+        # --------- ACCEPT: BÊN GỌI NHẬN ĐƯỢC "ACCEPT" ----------
+# 2. NHẬN ACCEPT (Bên gọi nhận được tin bên kia đồng ý)
+        elif kind == "accept":
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText(f"✅ {from_user} đã chấp nhận. Đang kết nối...")
+
+            dlg = getattr(self, "current_call_window", None)
+            if dlg is None: return
+
+            # QUAN TRỌNG: Lấy Camera/Mic người gọi đã chọn gán vào WebRTC
+            dlg.prepare_webrtc_devices()
+
+            # Tạo Offer
+            offer = dlg.webrtc.create_offer()
+            if offer is None: return
+
+            reply = {
+                "kind": "offer",
+                "is_video": is_video,
+                "payload": {"sdp": offer.sdp, "type": offer.type},
+                "to": from_user,
+            }
+            if mode == "group": reply["conversation_id"] = conv_id
+
+            try: self.sock.sendall(make_packet("call_signal", reply))
+            except: pass
+
+        # --------- REJECT ----------
+        elif kind == "reject":
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText(f"❌ {from_user} đã từ chối cuộc gọi")
+            if self.current_call_window: self.current_call_window.close()
+
+
+
+        # --------- OFFER: BÊN NHẬN TẠO ANSWER ----------
+        elif kind == "offer":
+            dlg = getattr(self, "current_call_window", None)
+            if dlg is None or dlg.webrtc is None: return
+
+            # 1. Set Remote
+            payload = data.get("payload")
+            dlg.webrtc.set_remote(payload["sdp"], payload["type"])
+
+            # 2. QUAN TRỌNG: Lấy Camera/Mic người nhận đã chọn gán vào WebRTC
+            dlg.prepare_webrtc_devices()
+
+            # 3. Tạo Answer
+            answer = dlg.webrtc.create_answer()
+            if answer is None: return
+
+            reply = {
+                "kind": "answer",
+                "is_video": is_video,
+                "payload": {"sdp": answer.sdp, "type": answer.type},
+                "to": data["from"],
+            }
+            if mode == "group": reply["conversation_id"] = conv_id
+
+            try: self.sock.sendall(make_packet("call_signal", reply))
+            except: pass
+
+        # --------- ANSWER: BÊN GỌI SET REMOTE ----------
+        elif kind == "answer":
+            dlg = getattr(self, "current_call_window", None)
+            if dlg is None: return
+            payload = data.get("payload")
+            if payload:
+                dlg.webrtc.set_remote(payload["sdp"], payload["type"])
+
+        # --------- ICE (hiện tại stub, chưa dùng thật) ----------
+        elif kind == "ice":
+            cand = data["payload"]["candidate"]
+            dlg = self.current_call_window
+            dlg.webrtc.add_ice({
+                "candidate": cand["candidate"],
+                "sdpMid": cand["sdpMid"],
+                "sdpMLineIndex": cand["sdpMLineIndex"]
+            })
+
+
+
+
     def send_file(self, path, file_type):
         if not self.current_username:
             self.lbl_chat_status.setText("⚠️ Chưa đăng nhập")
@@ -213,39 +388,6 @@ class ChatWindow(QMainWindow):
             self._open_link(content)
 
 
-    def __init__(self):
-        super().__init__()
-        self.sock: socket.socket | None = None
-        self.net_thread: NetworkThread | None = None
-
-        self.current_username: str | None = None
-        self.current_display_name: str | None = None
-        self.current_partner_username: str | None = None
-        self.conversations: list[dict[str, Any]] = []
-        self.current_group_id: int | None = None
-        self.current_group_is_owner: bool = False
-        self.current_attachments_kind: str | None = None  # 'media' | 'files' | 'links' | None
-        self.current_group_members: list[dict] = []  # lưu tạm danh sách thành viên của group đang mở
-
-        # cache avatar user: (username, size) -> QPixmap
-        self._user_avatar_cache: dict[tuple[str, int], QPixmap] = {}
-         # cache avatar tròn nhỏ cho từng username, dùng trong group chat
-        self._avatar_cache: dict[str, QPixmap] = {}
-        # Dựng UI
-        setup_chatwindow_ui(self)
-                # Ẩn nút tạo nhóm khi chưa đăng nhập
-        if hasattr(self, "btn_create_group"):
-            self.btn_create_group.setVisible(False)
-
-        # Lưu avatar mặc định (từ assets/default_avatar.png)
-        self.default_avatar_small = getattr(self, "avatar_small", None)
-        self.default_avatar_large = getattr(self, "avatar_large", None)
-        self.main_avatar_b64: str | None = None  # avatar của chính mình (base64, nếu có)
-
-        # Kết nối server + nối signal
-        self._connect_to_server()
-        self._connect_signals()
-        self._update_info_panel(None)
 
     # ---------- Avatar helpers ----------
 
@@ -325,6 +467,11 @@ class ChatWindow(QMainWindow):
 
         if hasattr(self, "lbl_partner_avatar") and hasattr(self.lbl_partner_avatar, "clicked"):
             self.lbl_partner_avatar.clicked.connect(self.on_change_group_avatar_clicked)
+        # 👉 NỐI SỰ KIỆN NÚT GỌI THOẠI / VIDEO
+        if hasattr(self, "btn_call_audio"):
+            self.btn_call_audio.clicked.connect(self.on_start_audio_call)
+        if hasattr(self, "btn_call_video"):
+            self.btn_call_video.clicked.connect(self.on_start_video_call)
 
         # Sidebar
         self.sidebar.conversation_selected.connect(self.on_sidebar_conversation_selected)
@@ -810,6 +957,8 @@ class ChatWindow(QMainWindow):
         elif action == "admin_banned_now":
             reason = data.get("reason") or "Tài khoản của bạn đã bị ban bởi quản trị viên."
             self.show_banned_dialog(reason)
+        elif action == "call_signal":
+            self.handle_call_signal(data)
 
         elif action == "incoming_image":
             from_user = data.get("from")
@@ -1926,6 +2075,9 @@ class ChatWindow(QMainWindow):
         except OSError as e:
             self.lbl_chat_status.setText(f"❌ Lỗi gửi yêu cầu: {e}")
 
+
+
+
     def on_send_image_clicked(self):
         if not self.current_username:
             self.lbl_chat_status.setText("⚠️ Chưa đăng nhập")
@@ -1977,6 +2129,49 @@ class ChatWindow(QMainWindow):
         except Exception as e:
             self.lbl_chat_status.setText(f"❌ Lỗi gửi ảnh: {e}")
 
+    # ---------- CALL / WEBRTC: xác định đối tượng gọi ----------
+
+    def _ensure_call_target(self):
+        """
+        Xác định gọi private hay group.
+        Trả về (mode, label, peers, conv_id, partner_username)
+        """
+        if not self.current_username:
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("⚠️ Chưa đăng nhập")
+            return None, None, None, None, None
+
+        partner = getattr(self, "current_partner_username", None)
+        group_id = getattr(self, "current_group_id", None)
+
+        if not partner and group_id is None:
+            if getattr(self, "lbl_chat_status", None):
+                self.lbl_chat_status.setText("⚠️ Hãy chọn người hoặc nhóm trước khi gọi")
+            return None, None, None, None, None
+
+        if group_id is not None:
+            mode = "group"
+            label = f"nhóm #{group_id}"
+            peers = []
+            for m in getattr(self, "current_group_members", []):
+                uname = m.get("username")
+                if uname and uname != self.current_username:
+                    peers.append(uname)
+            return mode, label, peers, group_id, None
+
+        # private
+        mode = "private"
+        label = partner
+        peers = [partner] if partner else []
+        return mode, label, peers, None, partner
+
+    # ---------- NÚT GỌI AUDIO / VIDEO  ------------------
+
+    def on_start_audio_call(self):
+        self._start_call(is_video=False)
+
+    def on_start_video_call(self):
+        self._start_call(is_video=True)
 
     def on_send_file_clicked(self):
         """
@@ -2010,7 +2205,39 @@ class ChatWindow(QMainWindow):
         except Exception as e:
             if getattr(self, "lbl_chat_status", None):
                 self.lbl_chat_status.setText(f"❌ Lỗi gửi file: {e}")
+# Hàm hỗ trợ chung cho cả 2
+    def _start_call(self, is_video):
+        # 1. Xác định gọi cho ai (Private hay Group)
+        mode, label, peers, conv_id, partner = self._ensure_call_target()
+        if not mode: return
 
+        if getattr(self, "lbl_chat_status", None):
+            self.lbl_chat_status.setText(f"📞 Đang mời gọi tới {label}...")
+
+        # 2. Gửi gói tin INVITE
+        data = {"kind": "invite", "is_video": is_video, "payload": {}}
+        if mode == "private": data["to"] = partner
+        else: data["conversation_id"] = conv_id
+
+        try:
+            self.sock.sendall(make_packet("call_signal", data))
+        except:
+            self.lbl_chat_status.setText("⚠️ Mất kết nối server")
+            return
+
+        # 3. Mở cửa sổ gọi ngay lập tức
+        dlg = CallWindow(
+            parent=self,
+            mode=mode,
+            is_video=is_video,
+            self_name=self.current_username or "",
+            peers=peers,
+            is_incoming=False # <--- Mình là người gọi
+        )
+        
+        # 4. QUAN TRỌNG: Lưu lại biến này để các hàm khác dùng
+        self.current_call_window = dlg 
+        dlg.exec()
     def on_send_video_clicked(self):
         """
         Bấm nút 🎬 -> chọn video và gửi. Hỗ trợ cả 1-1 và group.
@@ -2423,3 +2650,40 @@ class ChatWindow(QMainWindow):
         btn_logout.clicked.connect(do_logout)
 
         dlg.exec()
+    def on_local_ice(self, candidate):
+        """
+        Được WebRTCSession gọi mỗi khi có ICE candidate mới.
+        Gửi candidate này qua server cho peer.
+        """
+        dlg = getattr(self, "current_call_window", None)
+        if dlg is None:
+            return
+
+        # Đóng gói candidate thành dict serializable
+        cand_dict = {
+            "candidate": candidate.to_sdp(),
+            "sdpMid": candidate.sdpMid,
+            "sdpMLineIndex": candidate.sdpMLineIndex,
+        }
+
+        data = {
+            "kind": "ice",
+            "is_video": dlg.is_video,
+            "payload": {
+                "candidate": cand_dict,
+            },
+        }
+
+        # Xác định gửi cho ai
+        if dlg.mode == "private":
+            if dlg.peers:
+                data["to"] = dlg.peers[0]
+        else:  # group
+            conv_id = getattr(self, "current_group_id", None)
+            if conv_id is not None:
+                data["conversation_id"] = conv_id
+
+        try:
+            self.sock.sendall(make_packet("call_signal", data))
+        except OSError:
+            print("[CALL] lỗi gửi ICE (mất kết nối server)")

@@ -1,6 +1,6 @@
 # common/config.py
 
-SERVER_HOST = "127.0.0.1"
+SERVER_HOST = "192.168.2.31"
 SERVER_PORT = 5555
 
 # Cấu hình 2 node CSDL phân tán (trên cùng MySQL XAMPP)
