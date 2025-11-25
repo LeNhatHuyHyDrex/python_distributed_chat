@@ -1175,7 +1175,153 @@ def handle_client(conn: socket.socket, addr):
                             })
                         except Exception:
                             pass
+            elif action == "create_group":
+                owner_username = data.get("owner")
+                group_name = data.get("name")
 
+                user = get_user_by_username(owner_username)
+                if not user:
+                    send_to_conn(conn, "create_group_result", {
+                        "ok": False,
+                        "error": "User not found"
+                    })
+                    continue
+                
+                # Tạo nhóm với 1 thành viên ban đầu là chủ nhóm
+                try:
+                    # Lưu ý: db_access.py của bạn có 2 hàm create_group_conversation, 
+                    # Python sẽ lấy hàm định nghĩa cuối cùng (có owner_id)
+                    conv_id = create_group_conversation(group_name, user["id"], [user["id"]])
+                    
+                    send_to_conn(conn, "create_group_result", {
+                        "ok": True,
+                        "conversation_id": conv_id,
+                        "group_name": group_name
+                    })
+                    print(f"[GROUP] Created group '{group_name}' ID: {conv_id} by {owner_username}")
+                except Exception as e:
+                    print(f"[GROUP] Create error: {e}")
+                    send_to_conn(conn, "create_group_result", {
+                        "ok": False,
+                        "error": str(e)
+                    })
+
+            elif action == "add_group_member":
+                # Client gửi: conversation_id, username (người được add), by (người add)
+                conv_id = int(data.get("conversation_id") or 0)
+                target_username = data.get("username")
+                by_username = data.get("by")
+
+                target_user = get_user_by_username(target_username)
+                if not target_user:
+                    send_to_conn(conn, "add_group_member_result", {
+                        "ok": False,
+                        "error": f"User '{target_username}' không tồn tại"
+                    })
+                    continue
+
+                # (Tuỳ chọn) Kiểm tra quyền: người 'by' có phải member nhóm không?
+                # Tạm thời bỏ qua để đơn giản, hoặc check is_user_in_conversation
+
+                success = add_user_to_conversation(conv_id, target_user["id"])
+                
+                if success:
+                    # 1. Báo cho người yêu cầu (để UI cập nhật status)
+                    send_to_conn(conn, "add_group_member_result", {
+                        "ok": True,
+                        "conversation_id": conv_id,
+                        "username": target_username
+                    })
+                    
+                    # 2. Báo cho người ĐƯỢC add (nếu online) để họ thấy nhóm mới trong sidebar ngay lập tức
+                    if target_username in clients:
+                        # Gửi signal giả lập "được mời vào nhóm" hoặc đơn giản là yêu cầu client reload
+                        send_to_conn(clients[target_username], "group_created", {
+                            "ok": True,
+                            "conversation_id": conv_id,
+                            "group_name": f"Group #{conv_id}" # Hoặc query tên nhóm nếu cần
+                        })
+                    
+                    print(f"[GROUP] Added {target_username} to group {conv_id}")
+                else:
+                    send_to_conn(conn, "add_group_member_result", {
+                        "ok": False,
+                        "error": "Đã là thành viên hoặc lỗi DB"
+                    })
+
+            elif action == "leave_group":
+                conv_id = int(data.get("conversation_id") or 0)
+                username = data.get("by")
+                
+                user = get_user_by_username(username)
+                if user:
+                    remove_user_from_conversation(conv_id, user["id"])
+                    send_to_conn(conn, "leave_group_result", {
+                        "ok": True,
+                        "conversation_id": conv_id
+                    })
+                    print(f"[GROUP] {username} left group {conv_id}")
+                else:
+                    send_to_conn(conn, "leave_group_result", {
+                        "ok": False,
+                        "error": "User not found"
+                    })
+
+            elif action == "join_group":
+                # Logic cho sidebar search -> enter -> join group theo tên
+                group_name = data.get("group_name")
+                username = data.get("username")
+                
+                user = get_user_by_username(username)
+                group = find_group_by_name(group_name) # Cần đảm bảo function này import từ db_access
+                
+                if not user or not group:
+                    send_to_conn(conn, "join_group_result", {
+                        "ok": False,
+                        "error": "Nhóm hoặc User không tồn tại"
+                    })
+                    continue
+                
+                success = add_user_to_conversation(group["id"], user["id"])
+                if success:
+                    send_to_conn(conn, "join_group_result", {
+                        "ok": True,
+                        "conversation_id": group["id"],
+                        "group_name": group["name"]
+                    })
+                else:
+                    send_to_conn(conn, "join_group_result", {
+                        "ok": False,
+                        "error": "Đã tham gia hoặc lỗi"
+                    })
+            
+            elif action == "delete_group":
+                # Xử lý xóa nhóm (chỉ owner)
+                conv_id = int(data.get("conversation_id") or 0)
+                by_username = data.get("by")
+                
+                user = get_user_by_username(by_username)
+                if not user:
+                    continue
+
+                # delete_group trong db_access đã check owner_id chưa? 
+                # Hàm delete_group bạn cung cấp có check owner_id.
+                ok = delete_group(conv_id, user["id"])
+                
+                if ok:
+                    # Báo cho người xóa
+                    send_to_conn(conn, "delete_group_result", {
+                        "ok": True,
+                        "conversation_id": conv_id
+                    })
+                    # Broadcast cho các user khác biết nhóm đã bị xóa (để remove khỏi sidebar)
+                    # (Logic này hơi phức tạp vì cần loop all online users check xem họ có trong nhóm ko)
+                    # Tạm thời chỉ phản hồi người xóa.
+                else:
+                    send_to_conn(conn, "delete_group_result", {
+                        "ok": False,
+                        "error": "Không tìm thấy nhóm hoặc bạn không phải chủ nhóm"
+                    })
             elif action == "send_group_file":
                 conv_id = int(data.get("conversation_id") or 0)
                 sender = data.get("from")

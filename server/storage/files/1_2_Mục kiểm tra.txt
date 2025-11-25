@@ -1,0 +1,11 @@
+| **Mục kiểm tra**                               | **Lệnh kiểm tra**                                      | **Kết quả mong đợi**                             |                                                  |
+| ---------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ |
+| **1. Kiểm tra phiên bản hệ điều hành Ubuntu**  | `lsb_release -a`                                       | Ubuntu 20.04.x LTS (focal)                       |                                                  |
+| **2. Kiểm tra ROS Noetic đã cài đúng chưa**    | `rosversion -d`                                        | `noetic`                                         |                                                  |
+| **3. Kiểm tra biến môi trường ROS**            | `printenv                                              | grep ROS`                                        | Xuất hiện ROS_DISTRO, ROS_ROOT, ROS_PACKAGE_PATH |
+| **4. Kiểm tra ROS được load từ ~/.bashrc**     | `grep "source /opt/ros/noetic/setup.bash" ~/.bashrc`   | In ra dòng `source /opt/ros/noetic/setup.bash`   |                                                  |
+| **5. Kiểm tra Gazebo đã cài và hoạt động**     | `gazebo --version`                                     | Version 11.x.x                                   |                                                  |
+|                                                | `gazebo`                                               | Cửa sổ Gazebo mở thành công                      |                                                  |
+| **6. Kiểm tra workspace catkin_ws**            | `ls ~/catkin_ws`                                       | Có 3 thư mục: `build`, `devel`, `src`            |                                                  |
+| **7. Kiểm tra workspace được load vào bashrc** | `grep "source ~/catkin_ws/devel/setup.bash" ~/.bashrc` | In ra dòng `source ~/catkin_ws/devel/setup.bash` |                                                  |
+| **8. Kiểm tra ROS Master**                     | `roscore`                                              | ROS master khởi động → `/rosout` xuất hiện       |                                                  |
